@@ -114,6 +114,13 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define REV_STRING "GLASSLYCFW-IO/1"
 #define MAX_CHUNK 240u
 #define STORE_KIB 64u
+/* IDENT flags: bit0 = zlib COMPRESSED records accepted; bit1 = raw stream packets
+ * accepted on business 0xF0 (downlink). v1 advertises 0x01: zlib yes, raw-0xF0
+ * downlink no (the downlink is the named-file channel, see link.c). */
+#define IDENT_FLAG_ZLIB     0x01u
+#define IDENT_FLAG_RAW_0XF0 0x02u
+#define IDENT_FLAGS         (IDENT_FLAG_ZLIB)
+#define FILE_MAX_BYTES 48000u      /* one whole stream (RESET..END) per glassly-cfw.gcf file */
 #define CFW_STORE_BYTES (STORE_KIB * 1024u)
 
 /* stream packet opt bits */

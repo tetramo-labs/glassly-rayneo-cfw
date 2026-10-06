@@ -44,7 +44,10 @@ PAGE  [13][state u8][reason u8]
   no messageNumber, so `stream` is 0; this is wired for the 0xF0 stream path.
 * `ordinal` = per-stream message counter (reset at RESET).
 * IDENT: `ver=1`, `w=540`, `h=180`, `maxChunk=240`, `storeKiB=64`, `revision=1`,
-  `flags bit0=1` (zlib compressed records accepted — the stock inflater is used).
+  `flags = 0x01`. Flag bits: **bit0** = zlib COMPRESSED records accepted (the
+  stock inflater is used); **bit1** = raw stream packets accepted on business
+  0xF0 (downlink). v1 advertises `0x01`: zlib yes, raw-0xF0 downlink **no** — the
+  phone must use the named-file downlink below.
 * REPLY `status`: 0 APPLIED, 1 STALE (epoch mismatch), 2 MISSING (unknown id/ver),
   3 CAPACITY, 4 REFUSED.
 * GESTURE `eventType`: 0 single_tap, 1 swipe_up, 2 swipe_down, 3 double_tap,
@@ -65,9 +68,34 @@ PAGE  [13][state u8][reason u8]
 * With IDENT `flags bit0 = 0` the phone would send every record uncompressed with
   RESET_CONTEXT only on the first; this build advertises bit0 = 1.
 
-## Transport note (v1)
+## Downlink paths
 
-See `docs/HOOKS.md` "demux decision": v1 receives the downlink as the
-`glassly-cfw.gcf` named file (business 18) framed as length-delimited stream
-blocks `[opt u8][len u16 LE][chunk]`, and sends the uplink on business 0xF0. A
-verified raw-0xF0 demux is deferred to a hardware build.
+There are two downlink paths. Which one a firmware accepts is announced by IDENT
+bit1; the uplink (replies) is always business 0xF0.
+
+### Raw path (IDENT bit1 = 1) — NOT in v1
+
+Stream packets `[opt u8][chunk]` as the payload of business-0xF0 AA55 frames,
+one packet per frame; stream id = messageNumber of the RESET frame, consecutive
+messageNumbers per stream; `stream` byte in ACK/NACK/REPLY = low byte of that
+messageNumber. v1 does not implement this path (no verified business demux).
+
+### Named-file path (IDENT bit1 = 0) — v1, exactly as the phone sends it
+
+* The phone uploads a file named **`glassly-cfw.gcf`** over **business 18**
+  (the stock file transfer). The firmware's file-receive hook delivers it once
+  it is complete.
+* File body = a sequence of blocks **`[opt u8][len u16 LE][chunk]`**. `opt`
+  bits are identical to the raw path: `0x01 LENS` (always set), `0x80 RESET`,
+  `0x40 END`, `0x10 CONTROL`. `chunk` is the stream chunk (≤ maxChunk) or, for
+  CONTROL, the single control byte.
+* **One whole stream (RESET … END) per file**, file ≤ **48000 bytes**. The
+  firmware rejects larger files.
+* A **control packet is a one-block file**: `[0x10][01 00][ctrl]`.
+* There is no messageNumber on this path, so the **`stream` byte is 0** in
+  ACK/NACK/REPLY.
+* **QUERY is accepted on both paths** (as a one-block file here) and answered
+  with IDENT without the page being open.
+
+Replies for both paths: business 0xF0 via `rnlink_if_send_payload`, ≤ 192 B,
+one at a time ≥ 100 ms apart. See `docs/HOOKS.md` "demux decision".

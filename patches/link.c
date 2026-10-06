@@ -5,10 +5,13 @@
  * environment has no ARM disassembler, so a generic RNLink business demux could
  * not be verified for a safe entry hook. v1 therefore uses the spec §7 fallback:
  * the DOWNLINK is the named-file channel — the launcher's file-receive callback
- * (byte-verified hook) delivers a completed file "glassly-cfw.gcf" whose bytes
- * are length-delimited stream blocks [opt u8][len u16 LE][chunk]. The UPLINK uses
- * rnlink_if_send_payload(0xF0, ...). The phone spec (§3) uses raw 0xF0 frames in
- * both directions; the one deviation a phone must know is the downlink framing.
+ * (byte-verified hook) delivers a completed file "glassly-cfw.gcf" (business 18)
+ * whose body is blocks [opt u8][len u16 LE][chunk]: one whole stream
+ * (RESET..END) per file, <= 48000 bytes; a control packet is a one-block file.
+ * opt bits are identical to the raw 0xF0 path (0x01 LENS, 0x80 RESET, 0x40 END,
+ * 0x10 CONTROL). There is no AA55 messageNumber on this path, so the `stream`
+ * byte in ACK/NACK/REPLY is 0. The UPLINK uses rnlink_if_send_payload(0xF0, ...).
+ * IDENT advertises flags 0x01 (bit1 "raw 0xF0 downlink" clear).
  *
  * The RX callback only validates, deep-copies and enqueues to the launcher UI
  * thread (message_processor_send). All record parsing, LVGL mutation and uplink
@@ -268,7 +271,7 @@ void cfw_file_rx(const TIONativeFile *f) {
         ctx->ui_registered = 1;
     }
     uint32_t n = f->declared;
-    if (!n || n > (CFW_REC_BUF + 1024u)) return;
+    if (!n || n > FILE_MAX_BYTES) return;   /* one stream per file, <= 48000 B */
     uint8_t *copy = (uint8_t *)fw_memalign(4, n);
     if (!copy) return;
     memcpy(copy, f->data, n);

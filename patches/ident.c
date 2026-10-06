@@ -16,7 +16,7 @@ void cfw_send_ident(customCfwContext *ctx) {
     cfw_put16(p, MAX_CHUNK); p += 2;
     cfw_put16(p, STORE_KIB); p += 2;
     cfw_put16(p, REV_MAJOR); p += 2;      /* revision */
-    *p++ = 0x01;                      /* flags bit0: zlib COMPRESSED records accepted */
+    *p++ = (uint8_t)IDENT_FLAGS;      /* bit0 zlib yes, bit1 raw-0xF0 downlink no */
     for (unsigned i = 0; i < sizeof(name) - 1; i++) *p++ = (uint8_t)name[i];
     cfw_uplink_push(ctx, b, (uint8_t)(p - b));
 }

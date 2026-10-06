@@ -8,11 +8,12 @@ Glassly CFW, so repacking the CFW archive means: swap in the patched AP, rewrite
 that one manifest row's `Size`/`Md5`, and re-emit every other member byte for
 byte, in the original order.
 
-"Deterministic" means the same inputs always produce the same output bytes: all
-members are stored uncompressed (ZIP_STORED, so no zlib-version dependence),
-timestamps are fixed to the zip epoch (1980-01-01), and external attributes are
-zeroed. This lets the Glassly App pin a SHA-256 for both the stock and CFW
-archives it bundles.
+"Deterministic" means the same inputs always produce the same output bytes on
+one machine: members are deflated at zlib level 9, timestamps are fixed to the
+zip epoch (1980-01-01), and external attributes are zeroed. Deflate output can
+differ between zlib versions, so the pinned SHA-256s in build/pins.json are the
+ones produced by `./build_cfw.sh` on the release machine; the Glassly App pins
+those for both the stock and CFW archives it bundles.
 
 Stdlib only.
 
@@ -31,6 +32,7 @@ import sys, os, json, hashlib, zipfile, io, struct
 AP_NAME = "nuttx_ap.bin"
 MANIFEST = "OtaFileInfo.json"
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+DEFLATE_LEVEL = 9
 
 
 def _md5(b):
@@ -92,15 +94,15 @@ def serialize_manifest(manifest):
 
 
 def write_archive(order, members, out_path):
-    """Write `members` to `out_path` in `order`, deterministically: stored (no
-    compression), fixed epoch timestamp, zero external attributes."""
-    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_STORED) as z:
+    """Write `members` to `out_path` in `order`, deterministically: deflate level
+    9, fixed epoch timestamp, zero external attributes."""
+    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=DEFLATE_LEVEL) as z:
         for name in order:
             info = zipfile.ZipInfo(filename=name, date_time=ZIP_EPOCH)
-            info.compress_type = zipfile.ZIP_STORED
+            info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0
             info.create_system = 0
-            z.writestr(info, members[name])
+            z.writestr(info, members[name], compress_type=zipfile.ZIP_DEFLATED, compresslevel=DEFLATE_LEVEL)
 
 
 def repack(in_path, out_path, patched_ap=None):

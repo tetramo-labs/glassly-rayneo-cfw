@@ -18,9 +18,13 @@ phone-side RayNeo iO support in the Glassly repo.
 
 ## What it does
 
-* Adds a business-`0xF0` handler: the Glassly CFW record protocol (the same
-  record / message / asset formats the G2 Glassly CFW uses) plus a small control
-  channel (QUERY/IDENT, PAGE_OPEN/CLOSE, KEEPALIVE).
+* Adds the Glassly CFW link: the record protocol (the same record / message /
+  asset formats the G2 Glassly CFW uses) plus a small control channel
+  (QUERY/IDENT, PAGE_OPEN/CLOSE, KEEPALIVE). **Uplink** is business `0xF0`.
+  **Downlink in v1 is the named-file channel** (`glassly-cfw.gcf` over business
+  18, blocks `[opt u8][len u16 LE][chunk]`); IDENT advertises `flags = 0x01`
+  (bit0 zlib yes, bit1 raw-0xF0 downlink **no**). A raw business-0xF0 downlink
+  is not implemented in v1. See `docs/PROTOCOL.md` "Downlink paths".
 * Object cache (RESET/PUT/SHOW/HIDE) with image/string/font assets, 4bpp RLE,
   and RECT/RECT_FILL/IMAGE/TEXT_CACHED/TEXT_INLINE shape records, rendered into a
   540×180 L8 canvas (1-bit panel: gray ≥ 8 → on) plus positioned `lv_label`s for
@@ -60,9 +64,11 @@ The patch set is committed as JSON and applied with **pure-stdlib Python**
 (`patches/apply_patches.py`), so the build reproduces the pinned image with or
 without a clang cross-compiler. When clang is present, `build_cfw.sh` also
 regenerates the patch set and checks it still matches the committed one. Running
-the build twice produces byte-identical archives (the repack is deterministic —
-members are stored uncompressed with fixed timestamps, which trades a larger zip
-for cross-machine reproducibility of the pinned SHA-256).
+the build twice on one machine produces byte-identical archives (deflate level
+9, fixed timestamps, original member order). Deflate output can differ between
+zlib versions, so **the pins are the ones `./build_cfw.sh` produces on the
+release machine**; regenerate `build/pins.json` there and copy the values into
+the app's firmware catalog.
 
 ### Regenerate the patch set after editing the C
 

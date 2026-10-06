@@ -51,23 +51,35 @@ in the available `objdump`/`llvm-objdump`), so a generic RNLink business demux
 could **not** be verified for a safe displaced-prologue entry hook as the spec
 requires. v1 therefore takes the spec §7 fallback:
 
-* **Downlink** = the named-file channel. The byte-verified file-sink shim routes
-  a completed file named `glassly-cfw.gcf` to `cfw_file_rx`. The file bytes are
-  length-delimited stream blocks `[opt u8][len u16 LE][chunk]` (the only addition
-  over the raw 0xF0 stream-packet payload, so a file can carry several packets).
-* **Uplink** = `rnlink_if_send_payload(0xF0, …)` — spec-faithful.
+* **Downlink = the named-file channel (IDENT bit1 = 0).** The byte-verified
+  file-sink shim routes a completed file `glassly-cfw.gcf` (business 18) to
+  `cfw_file_rx`. Body = blocks `[opt u8][len u16 LE][chunk]`, opt bits identical
+  to the raw path (0x01 LENS, 0x80 RESET, 0x40 END, 0x10 CONTROL); one whole
+  stream (RESET…END) per file, ≤ 48000 B; a control packet is a one-block file;
+  `stream` byte = 0 in ACK/NACK/REPLY. QUERY is accepted on both paths.
+* **Raw 0xF0 downlink (IDENT bit1 = 1) is NOT implemented in v1.** IDENT
+  advertises `flags = 0x01` (zlib yes, raw-0xF0 no).
+* **Uplink** = `rnlink_if_send_payload(0xF0, …)` on both paths — spec-faithful.
 
-The phone spec (§3) uses raw business-0xF0 frames in both directions. **What the
-phone side must know:** to drive this v1 firmware it must send the downlink as the
-`glassly-cfw.gcf` named file over business 18 (file transfer), not as 0xF0 stream
-packets; replies still arrive on business 0xF0. Wiring a verified 0xF0 demux is
-deferred to a device build.
+**What the phone side must know:** read IDENT bit1. With bit1 = 0 (this build)
+send the downlink as the `glassly-cfw.gcf` file over business 18 with the
+framing above, not as 0xF0 stream packets; replies still arrive on 0xF0. The
+exact framing is in `docs/PROTOCOL.md` "Downlink paths". Wiring a verified raw
+0xF0 demux (then advertising bit1 = 1) is deferred to a device build.
 
 ## Unverified (behind clear comments; not claimed to work on hardware)
 
-No RayNeo iO hardware was available; nothing here is hardware-validated. These
-specific points rest on the prior firmware analysis rather than on a check this
-build can perform, and are guarded in the source:
+No RayNeo iO hardware was available; nothing here is hardware-validated. Two
+channels must be kept distinct when reading this list:
+
+* **File channel (v1 downlink, IDENT bit1 = 0):** the hook site is byte-verified,
+  but that a completed `glassly-cfw.gcf` upload over business 18 actually reaches
+  `cfw_file_rx` through the `[0x19750d2c + 0x18]` slot is unverified on device.
+* **Raw 0xF0 channel (IDENT bit1 = 1):** not implemented; no demux hook exists in
+  this build. Nothing about it is claimed.
+
+These specific points rest on the prior firmware analysis rather than on a check
+this build can perform, and are guarded in the source:
 
 1. **App-pointer chain** (`ctx.c`): `*(0x19a1f954)` → `+0x3c` manager → `+0x10`
    `AppListView`, state tail at `+0xdc`. The `0x19a1f954` pointer *constant* is
