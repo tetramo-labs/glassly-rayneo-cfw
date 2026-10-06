@@ -1,0 +1,4 @@
+# Build/apply (patches/*.py, tools/ota_pack.py) use the Python standard library
+# only. These deps are for the optional on-device tools and the test suite.
+bleak>=0.21        # tools/probe.py — BLE scan/connect/QUERY/IDENT
+pytest>=7.0        # tools/test_protocol.py

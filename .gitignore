@@ -1,0 +1,7 @@
+cache/
+venv/
+build/
+obj/
+patches/generated/
+__pycache__/
+*.pyc
