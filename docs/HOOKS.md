@@ -69,6 +69,14 @@ exact framing is in `docs/PROTOCOL.md` "Downlink paths". Wiring a verified raw
 
 ## Unverified (behind clear comments; not claimed to work on hardware)
 
+Hardware result so far (2026-10-07): the patched AP boots, the OTA is
+confirmed, and the launcher answers general status. The first image stored
+every module callback pointer even and one byte high (the resolver re-added
+the Thumb bit that an ARM ELF `STT_FUNC` value already carries), so the file
+sink and the UI handler could never be entered; `build.py` now strips the bit
+first and asserts the stored `cfw_file_rx` address. Whether the file channel
+reaches `cfw_file_rx` is still open.
+
 No RayNeo iO hardware was available; nothing here is hardware-validated. Two
 channels must be kept distinct when reading this list:
 

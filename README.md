@@ -9,8 +9,9 @@ phone-side RayNeo iO support in the Glassly repo.
 
 **Revision: `GLASSLYCFW-IO/1`.**
 
-> ⚠️ **Unverified on hardware.** This firmware has never run on a RayNeo iO. It
-> is verified only at the compile/unit-test level. Flashing can brick the device
+> ⚠️ **Barely verified on hardware.** One earlier build of this revision flashed,
+> booted and OTA-confirmed on a RayNeo iO (2026-10-07) but its Glassly link was
+> broken by a build bug; the current image has not been flashed yet. Flashing can brick the device
 > and there is no verified recovery path. Read [`docs/SAFETY.md`](docs/SAFETY.md)
 > first. The protocol knowledge here comes from prior firmware analysis of the
 > stock image; the object cache and RLE code are derived from the sibling Even

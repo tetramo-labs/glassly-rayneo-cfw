@@ -336,15 +336,19 @@ def compile_blob(src, module_va):
                 bad.append(f"  {rs['sname']}+{r_offset:#x} type={r_type} -> {sym['name']!r}: "
                            "external/undefined (call firmware via fw_syms.h literals)")
                 continue
-            sym_blob = base[sym["shndx"]] + (sym["value"] & ~1 if r_type in (R_ARM_THM_CALL, R_ARM_THM_JUMP24) else sym["value"])
+            # A Thumb STT_FUNC symbol already carries bit 0 in st_value (ARM ELF
+            # ABI); strip it before computing the address and re-add it once for
+            # absolute references, or every callback pointer lands even and one
+            # byte past the function start.
+            is_func = sym["typ"] == 2
+            sym_blob = base[sym["shndx"]] + (sym["value"] & ~1 if is_func else sym["value"])
+            thumb_bit = 1 if is_func else 0
             if r_type in (R_ARM_THM_CALL, R_ARM_THM_JUMP24) and tgt == text_idx:
                 _thumb_branch(blob, wpos, sym_blob)
             elif r_type in (R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVT_ABS):
-                thumb_bit = 1 if (sym["typ"] == 2) else 0
                 _resolve_movwt_abs(blob, wpos, module_va + sym_blob + thumb_bit, high=(r_type == R_ARM_THM_MOVT_ABS))
             elif r_type == R_ARM_ABS32:
                 addend = struct.unpack_from("<I", blob, wpos)[0]
-                thumb_bit = 1 if (sym["typ"] == 2) else 0
                 struct.pack_into("<I", blob, wpos, (module_va + sym_blob + thumb_bit + addend) & 0xFFFFFFFF)
             else:
                 bad.append(f"  {rs['sname']}+{r_offset:#x} type={r_type} -> {sym['name']!r}: unsupported")
@@ -417,6 +421,11 @@ def build_ap(ap, src=None):
             raise BuildError(f"shim pointer constant at {va:#x} is {got:#x}, expected {want:#x}")
     shim_va = (module_va + funcs["cfw_register_shim"]) | 1
     shim_new = _branch_bytes(SHIM_SITE, shim_va, link=True) + bytes.fromhex("00bf") * 3
+    # The slot pointer the shim stores must be the Thumb address of cfw_file_rx;
+    # an even value faults the launcher the first time the firmware calls it.
+    want_rx = (module_va + funcs["cfw_file_rx"]) | 1
+    if struct.pack("<I", want_rx) not in blob:
+        raise BuildError(f"module does not hold the Thumb address of cfw_file_rx ({want_rx:#x})")
     ops.append({"offset": off(SHIM_SITE), "old": SHIM_STOCK.hex(), "new": shim_new.hex(),
                 "desc": "launcher file-receive slot -> cfw_register_shim (CFW record channel)"})
 

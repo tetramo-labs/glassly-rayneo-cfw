@@ -1,8 +1,12 @@
 # SAFETY — read before flashing
 
-**This firmware has never run on a RayNeo iO.** It is verified only at the
-compile and unit-test level. Flashing it is experimental and can brick your
-glasses. If a phone-side change can do what you need, do that instead.
+**Hardware status (2026-10-07):** the first revision-1 image flashed over the
+Glassly App's OTA flow, booted, reported `OtaValidationConfirmed` and
+reconnected; the launcher kept answering general-status requests. That build
+stored even (non-Thumb) callback pointers, so the Glassly link never answered
+and it was rebuilt (see `patches/build.py`). The rebuilt image has not yet been
+flashed. Flashing is still experimental and can brick your glasses. If a
+phone-side change can do what you need, do that instead.
 
 ## What is and is not verified
 
