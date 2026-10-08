@@ -9,8 +9,8 @@ iO and for the Even Realities G2 CFW. Panel is 540×180, single display, 1-bit
 
 ```
 AA55 frame  (phone BLE transport)  -> payload after the business byte
-  stream packets   [opt u8][chunk]            (3.1)   opt: 0x01 LENS, 0x80 RESET, 0x40 END, 0x10 CONTROL
-    control        [0x10][ctrl u8]            (3.2)   1 QUERY 2 PAGE_OPEN 3 PAGE_CLOSE 4 KEEPALIVE
+  packets          [opt u8][stream u8][chunk]  (3.1)   opt: 0x01 LENS, 0x80 RESET, 0x40 END, 0x10 CONTROL
+    control        [0x10][stream][ctrl u8]    (3.2)   1 QUERY 2 PAGE_OPEN 3 PAGE_CLOSE 4 KEEPALIVE
     record stream  [flags][len u16 LE][crc u16 LE][body]   (3.3 L1)
       flags: 0x01 LENS, 0x04 COMPRESSED (zlib SYNC_FLUSH, body ends 00 00 FF FF), 0x08 RESET_CONTEXT
       crc = CRC-16/CCITT-FALSE(poly 0x1021, init 0xFFFF) of the DECODED message
@@ -35,19 +35,18 @@ ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/1"
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/2"
 PAGE  [13][state u8][reason u8]
 ```
 
-* `stream` = the **low byte of the RESET packet's 16-bit AA55 messageNumber**
-  (per the finished phone implementation). In the v1 named-file downlink there is
-  no messageNumber, so `stream` is 0; this is wired for the 0xF0 stream path.
+* `stream` = the **low byte of the RESET frame's 16-bit AA55 messageNumber**,
+  as carried in every packet's second byte (RNLink strips the frame header
+  before the business callback runs, so the phone repeats it).
 * `ordinal` = per-stream message counter (reset at RESET).
-* IDENT: `ver=1`, `w=540`, `h=180`, `maxChunk=240`, `storeKiB=64`, `revision=1`,
-  `flags = 0x01`. Flag bits: **bit0** = zlib COMPRESSED records accepted (the
-  stock inflater is used); **bit1** = raw stream packets accepted on business
-  0xF0 (downlink). v1 advertises `0x01`: zlib yes, raw-0xF0 downlink **no** — the
-  phone must use the named-file downlink below.
+* IDENT: `ver=2`, `w=540`, `h=180`, `maxChunk=240`, `storeKiB=64`, `revision=2`,
+  `flags = 0x03`. Flag bits: **bit0** = zlib COMPRESSED records accepted (the
+  stock inflater is used); **bit1** = raw packets accepted on business 0xF0.
+  Revision 2 advertises both.
 * REPLY `status`: 0 APPLIED, 1 STALE (epoch mismatch), 2 MISSING (unknown id/ver),
   3 CAPACITY, 4 REFUSED.
 * GESTURE `eventType`: 0 single_tap, 1 swipe_up, 2 swipe_down, 3 double_tap,
@@ -68,34 +67,16 @@ PAGE  [13][state u8][reason u8]
 * With IDENT `flags bit0 = 0` the phone would send every record uncompressed with
   RESET_CONTEXT only on the first; this build advertises bit0 = 1.
 
-## Downlink paths
+## Downlink
 
-There are two downlink paths. Which one a firmware accepts is announced by IDENT
-bit1; the uplink (replies) is always business 0xF0.
+Every packet is the payload of one business-0xF0 AA55 frame. A record stream
+is RESET … END with consecutive frame numbers; `stream` in every packet is the
+low byte of the RESET frame's number and comes back in ACK/NACK/REPLY. A
+control packet is a single frame `[0x10][stream][ctrl]` (`stream` ignored).
+The firmware receives frames through an RNLink callback table it registers for
+business 0xF0 at launcher start (see `docs/HOOKS.md`); the stock file transfer
+is not involved. Revision 1's named-file downlink no longer exists.
 
-### Raw path (IDENT bit1 = 1) — NOT in v1
-
-Stream packets `[opt u8][chunk]` as the payload of business-0xF0 AA55 frames,
-one packet per frame; stream id = messageNumber of the RESET frame, consecutive
-messageNumbers per stream; `stream` byte in ACK/NACK/REPLY = low byte of that
-messageNumber. v1 does not implement this path (no verified business demux).
-
-### Named-file path (IDENT bit1 = 0) — v1, exactly as the phone sends it
-
-* The phone uploads a file named **`glassly-cfw.gcf`** over **business 18**
-  (the stock file transfer). The firmware's file-receive hook delivers it once
-  it is complete.
-* File body = a sequence of blocks **`[opt u8][len u16 LE][chunk]`**. `opt`
-  bits are identical to the raw path: `0x01 LENS` (always set), `0x80 RESET`,
-  `0x40 END`, `0x10 CONTROL`. `chunk` is the stream chunk (≤ maxChunk) or, for
-  CONTROL, the single control byte.
-* **One whole stream (RESET … END) per file**, file ≤ **48000 bytes**. The
-  firmware rejects larger files.
-* A **control packet is a one-block file**: `[0x10][01 00][ctrl]`.
-* There is no messageNumber on this path, so the **`stream` byte is 0** in
-  ACK/NACK/REPLY.
-* **QUERY is accepted on both paths** (as a one-block file here) and answered
-  with IDENT without the page being open.
-
-Replies for both paths: business 0xF0 via `rnlink_if_send_payload`, ≤ 192 B,
-one at a time ≥ 100 ms apart. See `docs/HOOKS.md` "demux decision".
+Replies: business 0xF0 via `rnlink_if_send_payload`, ≤ 192 B, one at a time
+≥ 100 ms apart, drained by the module's 100 ms LVGL timer, which the first
+handled packet creates.

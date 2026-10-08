@@ -50,6 +50,7 @@ FW_SYMBOLS = [
     ("memalign", "memalign", None),
     ("free", "free", None),
     ("rnlink_if_send_payload", "rnlink_if_send_payload", None),
+    ("rnlink_if_register_callback", "rnlink_if_register_callback", None),
     ("message_processor_send", "message_processor_send", None),
     ("message_processor_register_c_handler", "message_processor_register_c_handler", None),
     ("os_get_tick_count", "os_get_tick_count", None),
@@ -88,8 +89,9 @@ FW_SYMBOLS = [
 # ---- hook sites (all byte-verified against the stock image) -----------------
 # The AppListView allocation immediate is bumped 0xdc -> 0xfc so the object gains
 # a 32-byte tail at app+0xdc that holds the CFW state pointer (the prior-firmware
-# page-extension pattern). The launcher file-receive callback slot is pointed at
-# the CFW record receiver.
+# page-extension pattern). LinkMonitor::registerLinkCallback is hooked where it
+# fills the launcher's RNLink callback table, so the module can register its own
+# table for business 0xF0 through the same rnlink_if_register_callback.
 ALLOC_SITE = 0x1079FE2C          # movs immediate, stock "dc20" -> "fc20"
 SHIM_SITE = 0x106D9D1A           # 10-byte inline sequence -> bl cfw_register_shim
 SHIM_STOCK = bytes.fromhex("00241f48204b84610360")
@@ -396,7 +398,7 @@ def build_ap(ap, src=None):
     module_va = BASE + module_at
 
     blob, funcs = compile_blob(src, module_va)
-    for need in ("cfw_register_shim", "cfw_file_rx"):
+    for need in ("cfw_register_shim", "cfw_rx_data"):
         if need not in funcs:
             raise BuildError(f"module does not export {need}")
 
@@ -421,13 +423,13 @@ def build_ap(ap, src=None):
             raise BuildError(f"shim pointer constant at {va:#x} is {got:#x}, expected {want:#x}")
     shim_va = (module_va + funcs["cfw_register_shim"]) | 1
     shim_new = _branch_bytes(SHIM_SITE, shim_va, link=True) + bytes.fromhex("00bf") * 3
-    # The slot pointer the shim stores must be the Thumb address of cfw_file_rx;
-    # an even value faults the launcher the first time the firmware calls it.
-    want_rx = (module_va + funcs["cfw_file_rx"]) | 1
+    # The RNLink callback table must hold the Thumb address of cfw_rx_data; an
+    # even value faults the RNLink thread on the first business-0xF0 frame.
+    want_rx = (module_va + funcs["cfw_rx_data"]) | 1
     if struct.pack("<I", want_rx) not in blob:
-        raise BuildError(f"module does not hold the Thumb address of cfw_file_rx ({want_rx:#x})")
+        raise BuildError(f"module does not hold the Thumb address of cfw_rx_data ({want_rx:#x})")
     ops.append({"offset": off(SHIM_SITE), "old": SHIM_STOCK.hex(), "new": shim_new.hex(),
-                "desc": "launcher file-receive slot -> cfw_register_shim (CFW record channel)"})
+                "desc": "LinkMonitor::registerLinkCallback -> cfw_register_shim (registers the 0xF0 receiver)"})
 
     # 3. Relocate the build-info footer and append the module 32-byte aligned.
     pad = module_at - footer_at           # old footer bytes become zero padding
@@ -454,7 +456,7 @@ def build_ap(ap, src=None):
                    "purpose": "enlarge AppListView by 32 B for the CFW state tail"},
                   {"site": hex(SHIM_SITE), "len": len(SHIM_STOCK),
                    "old": SHIM_STOCK.hex(), "new": shim_new.hex(),
-                   "purpose": "route the launcher file-receive callback to cfw_register_shim"}],
+                   "purpose": "call cfw_register_shim from LinkMonitor::registerLinkCallback"}],
     }
     return patched, ops, info
 

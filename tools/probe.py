@@ -110,7 +110,7 @@ async def run(args):
         _ = hashlib.sha256  # SALT/auth helpers available for a full implementation
 
         print("sending QUERY on business 0xF0…")
-        await client.write_gatt_char(TX, f.build(BIZ_GLASSLY, bytes([0x10, CTRL_QUERY])), response=False)
+        await client.write_gatt_char(TX, f.build(BIZ_GLASSLY, bytes([0x10, 0x00, CTRL_QUERY])), response=False)
         try:
             await asyncio.wait_for(got.wait(), timeout=2.0)
             print("IDENT:", ident["value"])

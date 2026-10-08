@@ -7,11 +7,11 @@ application image `nuttx_ap.bin` to add one thing: a Glassly link on BLE busines
 forwards touch/crown gestures back. It is the firmware counterpart of the
 phone-side RayNeo iO support in the Glassly repo.
 
-**Revision: `GLASSLYCFW-IO/1`.**
+**Revision: `GLASSLYCFW-IO/2`.**
 
-> ⚠️ **Barely verified on hardware.** One earlier build of this revision flashed,
-> booted and OTA-confirmed on a RayNeo iO (2026-10-07) but its Glassly link was
-> broken by a build bug; the current image has not been flashed yet. Flashing can brick the device
+> ⚠️ **Barely verified on hardware.** Revision 1 flashed, booted and
+> OTA-confirmed on a RayNeo iO (2026-10-07) but never answered the phone; the
+> causes are fixed in revision 2, which has not been flashed yet. Flashing can brick the device
 > and there is no verified recovery path. Read [`docs/SAFETY.md`](docs/SAFETY.md)
 > first. The protocol knowledge here comes from prior firmware analysis of the
 > stock image; the object cache and RLE code are derived from the sibling Even
@@ -21,11 +21,10 @@ phone-side RayNeo iO support in the Glassly repo.
 
 * Adds the Glassly CFW link: the record protocol (the same record / message /
   asset formats the G2 Glassly CFW uses) plus a small control channel
-  (QUERY/IDENT, PAGE_OPEN/CLOSE, KEEPALIVE). **Uplink** is business `0xF0`.
-  **Downlink in v1 is the named-file channel** (`glassly-cfw.gcf` over business
-  18, blocks `[opt u8][len u16 LE][chunk]`); IDENT advertises `flags = 0x01`
-  (bit0 zlib yes, bit1 raw-0xF0 downlink **no**). A raw business-0xF0 downlink
-  is not implemented in v1. See `docs/PROTOCOL.md` "Downlink paths".
+  (QUERY/IDENT, PAGE_OPEN/CLOSE, KEEPALIVE), both over business `0xF0` in each
+  direction. The module registers its own RNLink receive table for business
+  0xF0 and advertises IDENT `flags = 0x03` (zlib yes, raw 0xF0 yes). Each packet
+  is `[opt][stream][chunk]`; see `docs/PROTOCOL.md`.
 * Object cache (RESET/PUT/SHOW/HIDE) with image/string/font assets, 4bpp RLE,
   and RECT/RECT_FILL/IMAGE/TEXT_CACHED/TEXT_INLINE shape records, rendered into a
   540×180 L8 canvas (1-bit panel: gray ≥ 8 → on) plus positioned `lv_label`s for

@@ -1,12 +1,12 @@
 # SAFETY — read before flashing
 
-**Hardware status (2026-10-07):** the first revision-1 image flashed over the
-Glassly App's OTA flow, booted, reported `OtaValidationConfirmed` and
-reconnected; the launcher kept answering general-status requests. That build
-stored even (non-Thumb) callback pointers, so the Glassly link never answered
-and it was rebuilt (see `patches/build.py`). The rebuilt image has not yet been
-flashed. Flashing is still experimental and can brick your glasses. If a
-phone-side change can do what you need, do that instead.
+**Hardware status (2026-10-07):** revision 1 flashed over the Glassly App's
+OTA flow, booted, reported `OtaValidationConfirmed` and reconnected; the
+launcher kept answering general-status requests. It never answered the phone
+(even callback pointers, an invalid message-processor module id, and an
+undrained reply queue — all fixed in revision 2, see `docs/HOOKS.md`).
+Revision 2 has not been flashed. Flashing is still experimental and can brick
+your glasses. If a phone-side change can do what you need, do that instead.
 
 ## What is and is not verified
 
@@ -21,10 +21,9 @@ Verified on this machine:
 
 **Not** verified (no hardware was available):
 
-* That the patched image boots, that the launcher file-receive hook delivers the
-  `glassly-cfw.gcf` channel, that the UI message ABI and app-pointer chain are
-  correct, that the LVGL page renders, or that gestures/crown forward. See the
-  "Unverified" section of `docs/HOOKS.md`.
+* That business-0xF0 frames reach the registered table on the RNLink thread,
+  that the app-pointer chain is correct, that the LVGL page renders, or that
+  gestures/crown forward. See the "Unverified" section of `docs/HOOKS.md`.
 * There is **no verified recovery path**. If the glasses do not boot after
   flashing, they may not be able to accept another OTA.
 
@@ -45,6 +44,6 @@ Verified on this machine:
 ## Scope
 
 v1 adds one thing: the Glassly page (a 540×180 overlay driven by the phone over
-business 0xF0 / the named-file channel) plus gesture forwarding. No animation,
+business 0xF0) plus gesture forwarding. No animation,
 vectors, keyboard, ANCS, head gestures, or carousel item. It does not touch the
 stock businesses, the OTA flow, audio, or the radio.

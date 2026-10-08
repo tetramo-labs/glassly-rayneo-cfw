@@ -1,55 +1,55 @@
 {
-  "base": "nuttx_ap.bin (Strix OS 1.0.4.12)",
-  "ap_load_base": "0x10190000",
-  "partition_capacity": "0x9f0000",
-  "size_ceiling_bytes": 9600000,
-  "build_info_footer": "1d3457be00001930",
-  "module_va": "0x10a972c0",
-  "module_bytes": 6196,
-  "hooks": [
-    {
-      "name": "applist_alloc",
-      "site_va": "0x1079fe2c",
-      "file_offset": "0x60fe2c",
-      "length": 2,
-      "displaced": "dc20",
-      "new": "fc20",
-      "verified": true,
-      "verification": "stock bytes 'dc20' asserted at the site",
-      "purpose": "Bump the launcher AppListView allocation 0xdc->0xfc, giving a 32-byte state tail at app+0xdc for the CFW heap-context pointer."
-    },
-    {
-      "name": "file_sink_shim",
-      "site_va": "0x106d9d1a",
-      "file_offset": "0x549d1a",
-      "length": 10,
-      "displaced": "00241f48204b84610360",
-      "new": "bef3effd00bf00bf00bf",
-      "verified": true,
-      "verification": "stock 10 bytes asserted; pointer constants asserted: [0x106d9d9c]=0x19750d2c (&file_sink), [0x106d9da0]=0x106d97f1 (stock callback), [0x10799030]=0x19a1f954 (&launcher)",
-      "purpose": "Replace the inline sequence that left the launcher's extra file-receive slot NULL with 'bl cfw_register_shim', which points that slot at cfw_file_rx and preserves the stock callback at [0]. This is the CFW downlink (named-file channel)."
-    },
-    {
-      "name": "footer_zero",
-      "site_va": "0x10a972b8",
-      "file_offset": "0x9072b8",
-      "length": 8,
-      "displaced": "1d3457be00001930",
-      "new": "0000000000000000",
-      "verified": true,
-      "verification": "stock footer bytes asserted; relocated to the new end by the append patch",
-      "purpose": "Zero the old 8-byte build-info footer slot so the appended module can start 32-byte aligned."
-    },
-    {
-      "name": "module_append",
-      "site_va": "0x10a972c0",
-      "file_offset": "0x9072c0",
-      "length": 6204,
-      "displaced": "",
-      "new": "<6196-byte module blob + 4-align + relocated footer 1d3457be00001930>",
-      "verified": true,
-      "verification": "appended at offset == stock length; module absolutely linked at module_va; patched AP <= 9600000 bytes",
-      "purpose": "Append the Glassly CFW module and relocate the build-info footer to the new end."
-    }
-  ]
+ "base": "nuttx_ap.bin (Strix OS 1.0.4.12)",
+ "ap_load_base": "0x10190000",
+ "partition_capacity": "0x9f0000",
+ "size_ceiling_bytes": 9600000,
+ "build_info_footer": "1d3457be00001930",
+ "module_va": "0x10a972c0",
+ "module_bytes": 6196,
+ "hooks": [
+  {
+   "name": "applist_alloc",
+   "site_va": "0x1079fe2c",
+   "file_offset": "0x60fe2c",
+   "length": 2,
+   "displaced": "dc20",
+   "new": "fc20",
+   "verified": true,
+   "verification": "stock bytes 'dc20' asserted at the site",
+   "purpose": "Bump the launcher AppListView allocation 0xdc->0xfc, giving a 32-byte state tail at app+0xdc for the CFW heap-context pointer."
+  },
+  {
+   "name": "link_register_shim",
+   "site_va": "0x106d9d1a",
+   "file_offset": "0x549d1a",
+   "length": 10,
+   "displaced": "00241f48204b84610360",
+   "new": "bef3effd00bf00bf00bf",
+   "verified": true,
+   "verification": "stock 10 bytes asserted; pointer constants asserted: [0x106d9d9c]=0x19750d2c (&file_sink), [0x106d9da0]=0x106d97f1 (stock callback), [0x10799030]=0x19a1f954 (&launcher)",
+   "purpose": "Inside LinkMonitor::registerLinkCallback: call cfw_register_shim, which registers the module's RNLink callback table for business 0xF0 (rnlink_if_register_callback) and then replays the displaced stock instructions unchanged (slot [0x19750d2c+0x18] stays NULL)."
+  },
+  {
+   "name": "footer_zero",
+   "site_va": "0x10a972b8",
+   "file_offset": "0x9072b8",
+   "length": 8,
+   "displaced": "1d3457be00001930",
+   "new": "0000000000000000",
+   "verified": true,
+   "verification": "stock footer bytes asserted; relocated to the new end by the append patch",
+   "purpose": "Zero the old 8-byte build-info footer slot so the appended module can start 32-byte aligned."
+  },
+  {
+   "name": "module_append",
+   "site_va": "0x10a972c0",
+   "file_offset": "0x9072c0",
+   "length": 6204,
+   "displaced": "",
+   "new": "<6196-byte module blob + 4-align + relocated footer 1d3457be00001930>",
+   "verified": true,
+   "verification": "appended at offset == stock length; module absolutely linked at module_va; patched AP <= 9600000 bytes",
+   "purpose": "Append the Glassly CFW module and relocate the build-info footer to the new end."
+  }
+ ]
 }

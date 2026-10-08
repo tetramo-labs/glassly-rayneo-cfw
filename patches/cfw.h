@@ -39,6 +39,11 @@ static inline int fw_msg_send(uint32_t module, const void *msg) {
 static inline int fw_msg_register(uint32_t module, void *handler, void *user) {
     return FW(int (*)(uint32_t, void *, void *), FWA_message_processor_register_c_handler)(module, handler, user);
 }
+/* rnlink_if_register_callback(cbs, sub, business): copies the 32-byte callback
+ * table into RNLink's 24-entry registry keyed by (sub, business byte). */
+static inline int fw_rnlink_register(const void *cbs, uint32_t sub, uint32_t business) {
+    return FW(int (*)(const void *, uint32_t, uint32_t), FWA_rnlink_if_register_callback)(cbs, sub, business);
+}
 static inline int fw_business_idle(void) { return FW(int (*)(void), FWA_launcher_is_business_idle)(); }
 static inline int fw_paired(void) { return FW(int (*)(void), FWA_rnlink_paired_status)(); }
 static inline void fw_report_activity(void) { FW(void (*)(void), FWA_display_report_activity)(); }
@@ -110,17 +115,16 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 1u
-#define REV_STRING "GLASSLYCFW-IO/1"
+#define REV_MAJOR 2u
+#define REV_STRING "GLASSLYCFW-IO/2"
 #define MAX_CHUNK 240u
 #define STORE_KIB 64u
 /* IDENT flags: bit0 = zlib COMPRESSED records accepted; bit1 = raw stream packets
- * accepted on business 0xF0 (downlink). v1 advertises 0x01: zlib yes, raw-0xF0
- * downlink no (the downlink is the named-file channel, see link.c). */
+ * accepted on business 0xF0 (the only downlink since revision 2). */
 #define IDENT_FLAG_ZLIB     0x01u
 #define IDENT_FLAG_RAW_0XF0 0x02u
-#define IDENT_FLAGS         (IDENT_FLAG_ZLIB)
-#define FILE_MAX_BYTES 48000u      /* one whole stream (RESET..END) per glassly-cfw.gcf file */
+#define IDENT_FLAGS         (IDENT_FLAG_ZLIB | IDENT_FLAG_RAW_0XF0)
+#define RAW_MAX_BYTES 4096u        /* one frame payload: [opt][stream][chunk <= MAX_CHUNK] */
 #define CFW_STORE_BYTES (STORE_KIB * 1024u)
 
 /* stream packet opt bits */
@@ -182,7 +186,10 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define PAGE_USER 4u
 
 #define PAGE_LEASE_MS 120000u
-#define UI_MODULE 0xF0u            /* message_processor module id for our UI pump */
+/* message_processor module ids are 1..15; PHONE (3) and MUSIC (5) have no stock
+ * handler. The first one that registers is used (a taken id is refused with -3). */
+#define UI_MODULE_FIRST  5u
+#define UI_MODULE_SECOND 3u
 #define UPLINK_MIN_GAP_MS 100u
 #define UPLINK_MAX 192u
 #define DOUBLE_TAP_MS 300u
@@ -240,7 +247,7 @@ typedef struct {
     /* classification / session */
     uint8_t queried;               /* phone sent QUERY this connection */
     uint8_t page_open;
-    uint8_t ui_registered;
+    uint8_t ui_module;             /* message_processor module our UI handler owns, 0 = none */
     uint8_t pending_wakeup;
 
     /* page / LVGL (UI thread only) */
@@ -302,6 +309,7 @@ void cfw_scene_hide(customCfwContext *ctx);
 int cfw_page_open(customCfwContext *ctx, uint8_t *reason);
 void cfw_page_close(customCfwContext *ctx, uint8_t reason);
 void cfw_page_ensure_ui(customCfwContext *ctx);
+void cfw_page_ensure_timer(customCfwContext *ctx);
 void cfw_page_tick(customCfwContext *ctx);
 
 /* input.c */
@@ -316,25 +324,20 @@ void cfw_send_page_state(customCfwContext *ctx, uint8_t state, uint8_t reason);
 int cfw_uplink_push(customCfwContext *ctx, const uint8_t *data, uint8_t len);
 void cfw_uplink_flush(customCfwContext *ctx);
 void cfw_control(customCfwContext *ctx, uint8_t ctrl);
-void cfw_feed_records(customCfwContext *ctx, const uint8_t *data, uint32_t len);
 
-/* ---- the one-and-only TIONativeMessage ABI (from the stock file bridge) ---- */
+/* ---- message_processor message (verified against enqueue_message) ---------- */
 #define TIO_MSG_ID 0x54494d47u     /* 'TIMG' */
 typedef struct {
     uint32_t id;
-    const uint8_t *data;
+    const uint8_t *data;           /* passed through as-is when mode == 0 */
     uint32_t bytes, reserved;
     void *context;
-    uint8_t mode, padding[3];
+    uint8_t mode, padding[3];      /* 0 or 1; the queue refuses anything else */
 } TIONativeMessage;
 
-typedef struct {
-    const uint8_t *data;
-    uint32_t declared;
-    char filename[256];
-    char uuid[64];
-    uint8_t route, complete, reserved[2];
-    uint32_t received;
-} TIONativeFile;
+/* RNLink per-business callback table (8 slots, copied by the registrar):
+ * 0 data(bus, data, len)  1 conn state  2 multipoint  3 bond  4 device info
+ * 5 send done  6 file received  7 data_ex(bus, data, len, flag) */
+typedef struct { void *slot[8]; } cfw_rn_callbacks;
 
 #endif /* GLASSLY_CFW_H */

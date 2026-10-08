@@ -206,12 +206,19 @@ class FirmwareModel:
         self.objects = {}        # id -> (version, type)
         self.active = []
         self.replies = []        # (kind, ...)
+        self.stream_id = 0       # echoed in ACK/NACK/REPLY
 
-    def feed_block(self, opt, chunk):
+    def feed_packet(self, payload):
+        """One business-0xF0 frame payload: [opt][stream][chunk]."""
+        assert len(payload) >= 2
+        self.feed_block(payload[0], payload[2:], stream=payload[1])
+
+    def feed_block(self, opt, chunk, stream=0):
         if opt & PKT_CONTROL:
             return
         if opt & PKT_RESET:
             self.buf = bytearray()
+            self.stream_id = stream
         self.buf += chunk
         while len(self.buf) >= 5:
             rlen = self.buf[1] | (self.buf[2] << 8)

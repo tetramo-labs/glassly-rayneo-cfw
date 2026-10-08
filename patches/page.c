@@ -35,6 +35,12 @@ void cfw_page_ensure_ui(customCfwContext *ctx) {
     ctx->canvas = canvas;
     ctx->canvas_buf = buf;
     cfw_input_attach(ctx, root);
+    cfw_page_ensure_timer(ctx);
+}
+
+/* The 100 ms service timer also drains the uplink queue, so it must exist as
+ * soon as the first packet is handled (IDENT is answered before any page). */
+void cfw_page_ensure_timer(customCfwContext *ctx) {
     if (!ctx->timer) ctx->timer = fw_timer_create((void *)cfw_timer_cb, 100, 0);
 }
 

@@ -1,21 +1,21 @@
-/* Business 0xF0 link: the downlink record channel, the control channel, and the
+/* Business 0xF0 link: the downlink packet channel, the control channel, and the
  * uplink replies.
  *
- * TRANSPORT DECISION (see docs/HOOKS.md and docs/PROTOCOL.md): this build
- * environment has no ARM disassembler, so a generic RNLink business demux could
- * not be verified for a safe entry hook. v1 therefore uses the spec §7 fallback:
- * the DOWNLINK is the named-file channel — the launcher's file-receive callback
- * (byte-verified hook) delivers a completed file "glassly-cfw.gcf" (business 18)
- * whose body is blocks [opt u8][len u16 LE][chunk]: one whole stream
- * (RESET..END) per file, <= 48000 bytes; a control packet is a one-block file.
- * opt bits are identical to the raw 0xF0 path (0x01 LENS, 0x80 RESET, 0x40 END,
- * 0x10 CONTROL). There is no AA55 messageNumber on this path, so the `stream`
- * byte in ACK/NACK/REPLY is 0. The UPLINK uses rnlink_if_send_payload(0xF0, ...).
- * IDENT advertises flags 0x01 (bit1 "raw 0xF0 downlink" clear).
+ * DOWNLINK (revision 2): the module registers its own RNLink callback table for
+ * business 0xF0 with rnlink_if_register_callback, from the same launcher init
+ * routine (LinkMonitor::registerLinkCallback) that registers the stock tables.
+ * Each business-0xF0 AA55 frame payload is one packet [opt u8][stream u8][chunk]:
+ * opt bits 0x01 LENS, 0x80 RESET, 0x40 END, 0x10 CONTROL; `stream` is the low
+ * byte of the RESET frame's AA55 messageNumber (RNLink does not hand the number
+ * to the callback, so the phone repeats it in every packet) and is echoed in
+ * ACK/NACK/REPLY. A control packet is [0x10][stream][ctrl].
  *
- * The RX callback only validates, deep-copies and enqueues to the launcher UI
- * thread (message_processor_send). All record parsing, LVGL mutation and uplink
- * run on the UI thread, one reply at a time, >= 100 ms apart, <= 192 bytes.
+ * The RX callback runs on the RNLink thread: it validates, deep-copies and
+ * enqueues to the LVGL thread through message_processor_send (module 5, or 3 if
+ * 5 is taken; ids must be 1..15 and a taken id is refused without side
+ * effects). All packet parsing, LVGL mutation and uplink run on the LVGL
+ * thread, one reply at a time, >= 100 ms apart, <= 192 bytes. The UPLINK uses
+ * rnlink_if_send_payload(0xF0, ...).
  */
 #include "cfw.h"
 
@@ -222,80 +222,79 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl) {
     }
 }
 
-/* ---- one stream block (opt, chunk) ----------------------------------------- */
-static void cfw_packet(customCfwContext *ctx, uint8_t opt, const uint8_t *chunk, uint32_t len) {
+/* ---- one stream packet (opt, stream, chunk) -------------------------------- */
+static void cfw_packet(customCfwContext *ctx, uint8_t opt, uint8_t stream, const uint8_t *chunk, uint32_t len) {
     if (opt & PKT_CONTROL) {
         if (len >= 1) cfw_control(ctx, chunk[0]);
         return;
     }
-    if (opt & PKT_RESET) { ctx->stream.used = 0; ctx->stream.in_stream = 1; ctx->stream.ordinal = 0; }
+    if (opt & PKT_RESET) {
+        ctx->stream.used = 0; ctx->stream.in_stream = 1; ctx->stream.ordinal = 0;
+        ctx->stream.stream_id = stream;
+    }
     if (len) stream_feed(ctx, chunk, len);
     if (opt & PKT_END) { ctx->stream.used = 0; ctx->stream.in_stream = 0; }
 }
 
-/* ======================= RX thread: file-receive ============================ */
-static int name_is_ours(const char *n) {
-    static const char want[] = "glassly-cfw.gcf";
-    for (unsigned i = 0; i < sizeof(want); i++) if (n[i] != want[i]) return 0;
-    return 1;
-}
-
-/* UI-thread handler for the deep-copied downlink. ABI (message_processor_send /
- * register_c_handler) is UNVERIFIED on this build: the handler is assumed to
- * receive the TIONativeMessage pointer. See docs/HOOKS.md. */
-static void cfw_ui_handler(void *arg) {
+/* ======================= LVGL thread: packet pump =========================== */
+static void cfw_ui_handler(void *arg, void *user) {
+    (void)user;
     const TIONativeMessage *m = (const TIONativeMessage *)arg;
     if (!m || m->id != TIO_MSG_ID || !m->data) return;
     customCfwContext *ctx = cfw_ctx_peek();
-    if (ctx) {
-        const uint8_t *d = m->data;
-        uint32_t n = m->bytes, off = 0;
-        while (off + 3u <= n) {
-            uint8_t opt = d[off];
-            uint16_t blen = (uint16_t)(d[off + 1] | (d[off + 2] << 8));
-            off += 3;
-            if (off + blen > n) break;
-            cfw_packet(ctx, opt, d + off, blen);
-            off += blen;
-        }
+    if (ctx && m->bytes >= 2) {
+        cfw_page_ensure_timer(ctx);
+        cfw_packet(ctx, m->data[0], m->data[1], m->data + 2, m->bytes - 2);
+        cfw_uplink_flush(ctx);
     }
     fw_free((void *)m->data);   /* release the RX-thread deep copy */
 }
 
-void cfw_file_rx(const TIONativeFile *f) {
-    if (!f || !f->complete || !name_is_ours(f->filename)) return;
+/* ======================= RNLink thread: business 0xF0 ======================= */
+static int cfw_ui_register(customCfwContext *ctx) {
+    if (ctx->ui_module) return 1;
+    if (fw_msg_register(UI_MODULE_FIRST, (void *)cfw_ui_handler, 0) == 0) ctx->ui_module = UI_MODULE_FIRST;
+    else if (fw_msg_register(UI_MODULE_SECOND, (void *)cfw_ui_handler, 0) == 0) ctx->ui_module = UI_MODULE_SECOND;
+    return ctx->ui_module != 0;
+}
+
+static void cfw_rx_data(uint32_t bus, const uint8_t *data, uint32_t len) {
+    if (bus != BIZ_GLASSLY || !data || len < 2 || len > RAW_MAX_BYTES) return;
     customCfwContext *ctx = cfw_ctx();
-    if (!ctx) return;
-    if (!ctx->ui_registered) {
-        fw_msg_register(UI_MODULE, (void *)cfw_ui_handler, 0);
-        ctx->ui_registered = 1;
-    }
-    uint32_t n = f->declared;
-    if (!n || n > FILE_MAX_BYTES) return;   /* one stream per file, <= 48000 B */
-    uint8_t *copy = (uint8_t *)fw_memalign(4, n);
+    if (!ctx || !cfw_ui_register(ctx)) return;
+    uint8_t *copy = (uint8_t *)fw_memalign(4, len);
     if (!copy) return;
-    memcpy(copy, f->data, n);
+    memcpy(copy, data, len);
     TIONativeMessage msg;
     cfw_zero(&msg, (uint32_t)sizeof(msg));
     msg.id = TIO_MSG_ID;
     msg.data = copy;
-    msg.bytes = n;
+    msg.bytes = len;
     msg.mode = 0;
-    if (fw_msg_send(UI_MODULE, &msg) != 0) fw_free(copy);
+    if (fw_msg_send(ctx->ui_module, &msg) != 0) fw_free(copy);
 }
 
-/* ======================= launcher file-sink shim ============================
- * Replaces the 10-byte inline sequence that left the launcher's extra
- * file-receive slot NULL; points it at cfw_file_rx while preserving the stock
- * callback at [0]. Naked so the displaced `movs r4,#0` (which following stock
- * code relies on) is reproduced exactly. Byte-verified by build.py. */
+/* Registered by the boot shim; RNLink copies the 32 bytes. Only slot 0 is used. */
+static const cfw_rn_callbacks cfw_rn_cbs = { { (void *)cfw_rx_data, 0, 0, 0, 0, 0, 0, 0 } };
+
+__attribute__((used)) void cfw_boot_register(void) {
+    fw_rnlink_register(&cfw_rn_cbs, 0, BIZ_GLASSLY);
+}
+
+/* ======================= launcher init shim =================================
+ * Replaces the 10-byte inline sequence in LinkMonitor::registerLinkCallback
+ * that clears the launcher table's slot 0x18 and stores its stock callback:
+ * registers the 0xF0 table first, then reproduces the displaced instructions
+ * (r0 and r4 are live afterwards). Byte-verified by build.py. */
 __attribute__((naked, used)) void cfw_register_shim(void) {
     __asm volatile(
+        "push {r4, lr}\n"
+        "bl cfw_boot_register\n"
+        "pop {r4, lr}\n"
         "movs r4, #0\n"
         "ldr r0, =0x19750d2c\n"
-        "ldr r3, =cfw_file_rx\n"
-        "str r3, [r0, #0x18]\n"
         "ldr r3, =0x106d97f1\n"
+        "str r4, [r0, #0x18]\n"
         "str r3, [r0]\n"
         "bx lr\n"
         ".ltorg\n"

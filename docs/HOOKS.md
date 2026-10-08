@@ -15,7 +15,7 @@ The machine-readable list is `patches/hooks.json`. Only `nuttx_ap.bin` changes.
 | Site (VA) | File off | Len | Stock bytes | New bytes | Purpose |
 |---|---|---|---|---|---|
 | `0x1079fe2c` | `0x60fe2c` | 2 | `dc 20` | `fc 20` | Enlarge the launcher `AppListView` allocation 0xdc→0xfc. The 32-byte tail at `app+0xdc` holds `{magic, ctx*}` — the CFW heap-context pointer. |
-| `0x106d9d1a` | `0x549d1a` | 10 | `00 24 1f 48 20 4b 84 61 03 60` | `bl cfw_register_shim` + 3×`nop` | Point the launcher's extra file-receive callback slot at `cfw_file_rx` (CFW downlink). The shim reproduces the displaced `movs r4,#0` and the two stores, preserving the stock callback at `[0x19750d2c]` and installing ours at `[+0x18]`. |
+| `0x106d9d1a` | `0x549d1a` | 10 | `00 24 1f 48 20 4b 84 61 03 60` | `bl cfw_register_shim` + 3×`nop` | Inside `LinkMonitor::registerLinkCallback`, just before the launcher registers its business-15 callback table at `0x19750d2c`. The shim calls `cfw_boot_register` (which registers the module's own table for business 0xF0 with `rnlink_if_register_callback`) and then reproduces the displaced `movs r4,#0` and the two stores unchanged, so slot `[+0x18]` stays NULL as in stock. |
 | `0x10a972b8` | `0x9072b8` | 8 | `1d 34 57 be 00 00 19 30` | `00`×8 | Zero the old footer slot (relocated to the new end). |
 | `0x10a972c0` | `0x9072c0` | 6204 | *(append)* | module blob + 4-align + footer | The CFW module + relocated footer. |
 
@@ -39,65 +39,52 @@ label/event/timer API, `lv_display_get_default`/`lv_display_get_screen_active`,
 ### zlib decision — PRESENT, used
 
 The stock image exports a zlib inflater (the `0x10835xxx` cluster). The module
-calls it, so IDENT advertises `flags bit0 = 1` (compressed records accepted). A
-second inflate/inflateEnd pair exists at `0x10681xxx` with no matching init in
-that cluster; it is deliberately not used (disambiguated by expected address in
-`build.py`).
+calls it, so IDENT advertises `flags bit0 = 1`. A second inflate/inflateEnd pair
+at `0x10681xxx` has no matching init and is deliberately not used.
 
-### demux decision — named-file fallback (spec §7)
+### Downlink — RNLink business table (verified by disassembly, 2026-10-07)
 
-This build environment has **no ARM disassembler** (no `capstone`, no ARM target
-in the available `objdump`/`llvm-objdump`), so a generic RNLink business demux
-could **not** be verified for a safe displaced-prologue entry hook as the spec
-requires. v1 therefore takes the spec §7 fallback:
+`rnlink_if_register_callback(cbs, sub, business)` (`0x107763dd`) copies a
+32-byte callback table into a 24-entry registry at `0x1987c780` (entry 0x2c
+bytes: table copy, `sub` @0x20, `cbs*` @0x24, business byte @0x28). Slot 0 is
+`data(bus, data, len)`, called by `rnlink_if_on_data_recv` for every entry whose
+business byte matches, with no business filtering upstream except the handshake
+(0x10) and 0x11. The launcher registers tables for 15 and 18 from
+`LinkMonitor::registerLinkCallback`; the module registers `{cfw_rx_data, 0…}`
+for 0xF0 from the shim in that same routine. The AA55 messageNumber is not
+passed to the callback, hence the `stream` byte in every packet
+(`docs/PROTOCOL.md`).
 
-* **Downlink = the named-file channel (IDENT bit1 = 0).** The byte-verified
-  file-sink shim routes a completed file `glassly-cfw.gcf` (business 18) to
-  `cfw_file_rx`. Body = blocks `[opt u8][len u16 LE][chunk]`, opt bits identical
-  to the raw path (0x01 LENS, 0x80 RESET, 0x40 END, 0x10 CONTROL); one whole
-  stream (RESET…END) per file, ≤ 48000 B; a control packet is a one-block file;
-  `stream` byte = 0 in ACK/NACK/REPLY. QUERY is accepted on both paths.
-* **Raw 0xF0 downlink (IDENT bit1 = 1) is NOT implemented in v1.** IDENT
-  advertises `flags = 0x01` (zlib yes, raw-0xF0 no).
-* **Uplink** = `rnlink_if_send_payload(0xF0, …)` on both paths — spec-faithful.
+`cfw_rx_data` (RNLink thread) deep-copies the payload and hands it to the LVGL
+thread with `message_processor_send`: module ids must be 1..15 (`getModuleName`
+table: 1 LAUNCHER … 15 RNLINK_CHANNEL); 3 PHONE and 5 MUSIC have no stock
+handler, and a taken id is refused with -3 without side effects, so the module
+registers 5, then 3, lazily on the first frame. The queued record copies
+`{id, data, bytes, reserved, context, mode}` and the C handler is called as
+`handler(msg, user)` from `message_processor_handle`, an LVGL timer created by
+`message_processor_init` — the LVGL thread. LVGL is built without OS locking,
+so timers are only ever created from that handler.
 
-**What the phone side must know:** read IDENT bit1. With bit1 = 0 (this build)
-send the downlink as the `glassly-cfw.gcf` file over business 18 with the
-framing above, not as 0xF0 stream packets; replies still arrive on 0xF0. The
-exact framing is in `docs/PROTOCOL.md` "Downlink paths". Wiring a verified raw
-0xF0 demux (then advertising bit1 = 1) is deferred to a device build.
+The stock file transfer is not usable as a downlink: business-18 payloads reach
+`onBigCoreFileRecvCallback`, which only logs, and the phone's INFO is never
+acknowledged (observed on hardware on stock and revision 1 alike).
 
 ## Unverified (behind clear comments; not claimed to work on hardware)
 
 Hardware result so far (2026-10-07): the patched AP boots, the OTA is
-confirmed, and the launcher answers general status. The first image stored
-every module callback pointer even and one byte high (the resolver re-added
-the Thumb bit that an ARM ELF `STT_FUNC` value already carries), so the file
-sink and the UI handler could never be entered; `build.py` now strips the bit
-first and asserts the stored `cfw_file_rx` address. Whether the file channel
-reaches `cfw_file_rx` is still open.
-
-No RayNeo iO hardware was available; nothing here is hardware-validated. Two
-channels must be kept distinct when reading this list:
-
-* **File channel (v1 downlink, IDENT bit1 = 0):** the hook site is byte-verified,
-  but that a completed `glassly-cfw.gcf` upload over business 18 actually reaches
-  `cfw_file_rx` through the `[0x19750d2c + 0x18]` slot is unverified on device.
-* **Raw 0xF0 channel (IDENT bit1 = 1):** not implemented; no demux hook exists in
-  this build. Nothing about it is claimed.
-
-These specific points rest on the prior firmware analysis rather than on a check
-this build can perform, and are guarded in the source:
+confirmed, and the launcher answers general status. Revision 1 never answered
+IDENT: its callback pointers were even (fixed in `build.py`), it used an
+invalid message-processor module id, and its uplink was only drained once a
+page existed. Revision 2 has not been flashed yet.
 
 1. **App-pointer chain** (`ctx.c`): `*(0x19a1f954)` → `+0x3c` manager → `+0x10`
    `AppListView`, state tail at `+0xdc`. The `0x19a1f954` pointer *constant* is
    byte-verified; the `+0x3c`/`+0x10`/`+0xdc` offsets are from prior analysis and
-   are only dereferenced after null checks (a wrong offset yields "no context",
-   not a fault that bricks boot — but could still misbehave on device).
-2. **UI message ABI** (`link.c`): `message_processor_register_c_handler` and
-   `message_processor_send` signatures, and that the registered handler receives
-   the `TIONativeMessage*`. The `TIONativeMessage`/`TIONativeFile` layouts are
-   from the stock file bridge in the prior analysis.
+   are only dereferenced after null checks (a wrong offset yields "no context").
+2. **Lazy handler registration** races the LVGL thread's handler lookup (an
+   unordered_map insert from the RNLink thread). It happens once per boot, on the
+   first business-0xF0 frame; a boot-time registration needs the AppListView,
+   which does not exist yet when the shim runs.
 3. **Crown/rotary input** (`input.c`): whether a full-screen page receives the
    crown as an LVGL rotary event (`LV_EVENT_ROTARY`, ~600 raw units/detent). The
    key click/long-press path uses the documented `LV_EVENT_KEY` codes 0x3a/0x3b.
@@ -105,6 +92,5 @@ this build can perform, and are guarded in the source:
    same-named entries) could not be verified, so inline/cached text uses
    positioned `lv_label`s with the default LVGL font instead.
 5. **Carousel item** ("Glassly" launcher entry) is **deferred**: the native menu
-   method-replacement addresses require disassembly verification not possible
-   here. v1 ships the phone-initiated page open only (PAGE_OPEN, gated on
-   `paired() && isBussinessIdle()`).
+   method-replacement addresses need disassembly verification. Pages open only
+   on PAGE_OPEN, gated on `paired() && isBussinessIdle()`.
