@@ -1,0 +1,87 @@
+# Raw business-0xF0 link — verified facts and the v2 plan (2026-10-07)
+
+Everything below was read from the stock 1.0.4.12 `nuttx_ap.bin` with capstone
+(`./venv/bin/python`, `CS_MODE_THUMB|CS_MODE_MCLASS`, load base `0x10190000`,
+RAM/data via `symbols.json` segments). Two flashes of revision 1 booted and
+OTA-confirmed on hardware, but the Glassly link stayed silent. Causes, in order
+found:
+
+1. **Thumb bit** (fixed in `build.py`, commit 76c7586): module function pointers
+   were even and +1.
+2. **The hook is not a file sink.** `0x106d9ce4` is
+   `LinkMonitor::registerLinkCallback`. It fills a 32-byte callback table at
+   `0x19750d2c` and registers it with `rnlink_if_register_callback(cbs, 0, 15)`
+   (business 15 = launcher), then a second table `0x19750d0c` for business 18
+   (`onBigCoreFileRecvCallback`, which only logs). Slot `[0x18]` is RNLink's
+   *file-received* callback, invoked by `rnlink_if_on_file_recv` for every
+   registered table. The file transfer the phone speaks (business 18 INFO) is
+   never acknowledged by this firmware (`handle_complete_packet` routes business
+   `0x11` to `ft_on_file_transfer_recv`; 18 goes to a logger). The named-file
+   downlink is dead on stock and CFW alike.
+3. **message_processor module id.** `message_processor_send` and
+   `register_handler_internal` accept module ids 1..15 only; the module used
+   0xF0. Ids in use: 1 LAUNCHER, 2, 4, 6, 7, 8, 9 (AlwaysOn), 10, 11, 12 (display
+   msg handler), 13 (A2UI), 14, 15 (RnLinkMsgChannelHost). **3 PHONE and 5
+   MUSIC have no observed registration.** Duplicate registration is refused
+   with `-3` ("already registered") without disturbing the existing handler.
+4. **Uplink never flushed before a page exists.** `cfw_uplink_flush` runs only
+   from the page timer created in `cfw_page_ensure_ui`, so IDENT would sit in
+   the queue on a fresh boot.
+
+## Verified ABI
+
+* `rnlink_if_register_callback(const void *cbs32, uint32_t sub, uint8_t bus)`
+  @ `0x107763dd`: 24-entry table at `0x1987c780`, entry 0x2c bytes =
+  `{cbs copy[0x20], sub @0x20, cbs* @0x24, bus @0x28}`. Slots: 0 data(bus,
+  data, len) — only when the frame is complete; 1 conn state; 2 multipoint;
+  3 bond; 4 device info; 5 send done; 6 file received(file*) for every table;
+  7 data_ex(bus, data, len, flag). Business byte compared with `ldrb`, so
+  0xF0 is addressable. `rnlink_if_on_data_recv` passes the business straight
+  through; the only special cases upstream are business 0x10 (handshake) and
+  0x11. The AA55 messageNumber is **not** available to the callback.
+* `message_processor_register_c_handler(module, handler, user)`: handler is
+  called as `handler(TIONativeMessage *copy, user)` from
+  `message_processor_handle`, an LVGL timer (16 ms) created by
+  `message_processor_init` — i.e. on the LVGL thread. `message_processor_send`
+  copies `{id, data, bytes, reserved, context, mode}` (mode must be 0 or 1;
+  mode 0 passes `data` through) into a 0x30-byte queue record. The module's
+  `TIONativeMessage` layout is correct.
+* LVGL is built with `LV_USE_OS == NONE` (`lv_mutex_lock` returns 1):
+  `lv_timer_create`/`lv_async_call` are only safe on the LVGL thread.
+* Uplink `rnlink_if_send_payload(bus, buf, len, cb)` has no business check.
+
+## v2 design (not yet implemented)
+
+Firmware (`GLASSLYCFW-IO/2`, IDENT flags `0x03`):
+
+* Shim at `0x106d9d1a`: `push {r4, lr}; bl cfw_boot_register; pop {r4, lr}` then
+  the stock sequence unchanged (slot `[0x18]` stays NULL). `cfw_boot_register`
+  calls `rnlink_if_register_callback(&cfw_rn_cbs, 0, 0xF0)`; `cfw_rn_cbs` is a
+  `const` 8-slot table in `.rodata` with only slot 0 = `cfw_rx_data`. Add the
+  symbol to `FW_SYMBOLS`; assert the Thumb address of `cfw_rx_data` in the blob.
+* `cfw_rx_data(bus, data, len)` (RNLink thread): bus must be 0xF0, 2 ≤ len ≤
+  4096; lazily `register_c_handler(5 → 3, cfw_ui_handler)` and record the id in
+  `ctx->ui_module` (replaces `ui_registered`); deep-copy and
+  `message_processor_send(ctx->ui_module, &msg)`, free on failure. The
+  registration races the LVGL-thread map lookup; accepted, document it.
+* Raw packet becomes `[opt][stream][chunk]`; control `[0x10][stream][ctrl]`.
+  `cfw_ui_handler` parses one packet per message, sets `stream.stream_id` on
+  RESET, creates the 100 ms service timer if absent (LVGL thread), and calls
+  `cfw_uplink_flush` after each packet. Delete `cfw_file_rx`, `TIONativeFile`,
+  `FILE_MAX_BYTES`, `UI_MODULE`.
+* Docs: PROTOCOL.md (3.1 packet layout, flags 0x03, drop the named-file
+  section), HOOKS.md (facts above; the hooked function's real identity),
+  README/SAFETY, `tools/probe.py` (`[0x10, 0, 1]`), `hooks.json`.
+
+Phone (both platforms):
+
+* `packetize` inserts the stream byte (low byte of the RESET frame's message
+  number; Android already receives `firstMessageNumber`, iOS computes
+  `cfwNextStreamId` first), `controlPacket` gains a stream byte (0 is fine).
+* Remove the file downlink: `RayNeoIOCfwFileLink`, `cfwDownlink`, `fileSender`
+  use in `probeFirmware`/`cfwSend` (iOS); `fileBlock`/`fileBodies`/
+  `parseFileBody`, `transmitFile`, `sendRecordAsFiles`, the file half of
+  `queryCfwIdentity` (Android). Arm the 2 s stock verdict right after the QUERY
+  frame. `minimumRevision`/`MINIMUM_REVISION` and the catalog revision → 2.
+* Update `RayNeoIOProtocolTests` / `RayNeoIOProtocolTest` packet and control
+  expectations; delete the file-link tests (keep `RayNeoIOFileTransfer` ones).
