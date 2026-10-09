@@ -28,7 +28,7 @@ swift run rayneo-io-suite --list
 swift run rayneo-io-suite --hold 60 --out results.json --verbose
 ```
 
-Groups and cases, in run order:
+Groups and cases, in run order (`anim` cases print SKIP and count as passed when the glasses run firmware older than revision 4):
 
 | group | id | what passes |
 |---|---|---|
@@ -52,6 +52,12 @@ Groups and cases, in run order:
 | scene | missing | SHOW of an unknown object → MISSING |
 | scene | stale | wrong epoch → STALE |
 | scene | bad-crc | wrong record CRC → NACK |
+| anim | settle-now | TAG-flagged SHOW without motion → SETTLED at once (revision 4; SKIP on older firmware) |
+| anim | glide | GLIDE over 15 frames → applied, SETTLED after ≥ 300 ms |
+| anim | tween | TWEEN x/y/w/h/r over 30 frames, ease-in-out → SETTLED after ≥ 700 ms |
+| anim | visible | VISIBLE 0 then 1 with the KEEP flag (ops only) |
+| anim | bad-op | op on an object outside the active set → REFUSED |
+| anim | hide-tagged | TAG-flagged HIDE → SETTLED |
 | scene | hide | HIDE applied |
 | page | close | PAGE_CLOSE → closed, reason 0 |
 | page | reopen | opens and closes again |

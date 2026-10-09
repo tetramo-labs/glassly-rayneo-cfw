@@ -15,6 +15,7 @@
 #include "ctx.c"
 #include "geom.c"
 #include "scene.c"
+#include "anim.c"
 #include "ident.c"
 #include "input.c"
 #include "page.c"

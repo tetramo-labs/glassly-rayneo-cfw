@@ -9,8 +9,9 @@ day's findings: the registry lookup keyed on a pointer the registrar never
 stores, the message handler freed a buffer the queue frees too (the glasses
 reset ~10 s after every QUERY), the paired gate can never pass for a guest
 link, and IDENT/PAGE kinds and the cache message modes were hex on one side and
-decimal on the other. Flashing is still experimental and can brick your
-glasses. If a phone-side change can do what you need, do that instead.
+decimal on the other. Revision 4 (animation ops, SETTLED) is built but has not been flashed; the
+app bundles and gates on revision 3. Flashing is still experimental and can
+brick your glasses. If a phone-side change can do what you need, do that instead.
 
 ## What is and is not verified
 

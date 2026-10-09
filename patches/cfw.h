@@ -115,8 +115,8 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 3u
-#define REV_STRING "GLASSLYCFW-IO/3"
+#define REV_MAJOR 4u
+#define REV_STRING "GLASSLYCFW-IO/4"
 #define MAX_CHUNK 240u
 #define STORE_KIB 64u
 /* IDENT flags: bit0 = zlib COMPRESSED records accepted; bit1 = raw stream packets
@@ -169,6 +169,26 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define SH_ARC        12u
 #define SH_PIE        13u
 #define SH_IMAGE      14u
+/* SHOW flags and ops (G2 scene.c; anim.c) */
+#define SHOW_FLAG_PRESENT 0x01u
+#define SHOW_FLAG_KEEP    0x02u
+#define SHOW_FLAG_TAG     0x04u
+#define SHOW_FLAG_FREEZE  0x08u
+#define OP_VISIBLE 2u
+#define OP_MOVE    3u
+#define OP_GLIDE   4u
+#define OP_TWEEN   5u
+#define OP_FREEZE  6u
+#define OP_FINISH  7u
+#define OP_ROTATE  9u
+#define OP_ALL_OBJECTS 0xffffffffu
+#define TWEEN_COLOR_BIT  0x100u
+#define TWEEN_WIDTH_BIT  0x200u
+#define TWEEN_MASK_VALID 0x3ffu
+#define REFUSE_TARGET 3u           /* op target not active / wrong type */
+#define REFUSE_MASK   4u           /* tween mask outside the type's range */
+#define OBJ_VISIBLE   0x01u        /* cfw_object.flags */
+#define CFW_ANIM_PERIOD_MS 33u
 #define SH_TEXT_CACHED 16u
 #define SH_TEXT_INLINE 17u
 /* reply kinds (glasses -> phone) */
@@ -230,9 +250,14 @@ typedef struct {
     uint32_t text_off;             /* store offset of resolved/inline string, 0 = none */
     uint16_t text_len;
     int16_t x, y, w, h, r;         /* image/text placement (= p[0..4]) */
-    int16_t p[8];                  /* geometry: the record's eight params */
+    int16_t p[8];                  /* geometry: the record's eight params (current) */
+    int16_t from[8], to[8];        /* tween endpoints while frames != 0 */
     uint8_t type, options, color, active;
     uint8_t width;                 /* geometry stroke width (record byte 3) */
+    uint8_t flags;                 /* OBJ_VISIBLE */
+    uint8_t frame, frames;         /* animation progress; frames 0 = idle */
+    uint8_t curve[4];              /* cubic-bezier easing x1 y1 x2 y2, /255 */
+    uint8_t color_from, color_to, width_from, width_to;
 } cfw_object;
 
 /* decoded message / record-assembly sizes */
@@ -291,6 +316,14 @@ typedef struct {
     uint16_t active_list[CACHE_OBJECTS];
     uint16_t active_count;
     uint32_t epoch_revision;
+    /* animation (anim.c, LVGL thread) */
+    void *anim_timer;
+    uint8_t anim_active;
+    uint8_t settle_pending;        /* a tagged SHOW has not reported SETTLED yet */
+    uint8_t last_show_valid;
+    uint8_t bg;                    /* background gray of the last SHOW */
+    uint16_t settle_tag;
+    uint16_t last_show_request;    /* a repeated SHOW/HIDE request id is acknowledged, not re-applied */
 
     /* uplink pacing */
     cfw_uplink uplink[UPLINK_QUEUE];
@@ -345,6 +378,21 @@ void cfw_ident_direct(const customCfwContext *ctx);
 void cfw_diag_direct(const customCfwContext *ctx);
 void cfw_send_diag(customCfwContext *ctx);
 void cfw_send_page_state(customCfwContext *ctx, uint8_t state, uint8_t reason);
+
+/* anim.c */
+uint32_t cfw_op_len(const uint8_t *p, uint32_t avail);
+uint8_t cfw_op_check(customCfwContext *ctx, const uint8_t *p, uint8_t *reason);
+void cfw_op_apply(customCfwContext *ctx, const uint8_t *p);
+void cfw_anim_freeze_all(customCfwContext *ctx);
+int cfw_anim_any(const customCfwContext *ctx);
+void cfw_anim_arm(customCfwContext *ctx);
+void cfw_anim_stop(customCfwContext *ctx);
+void cfw_anim_settled(customCfwContext *ctx);
+/* scene.c */
+void cfw_scene_render(customCfwContext *ctx);
+cfw_object *object_find(customCfwContext *ctx, uint32_t id);
+uint16_t rd16(const uint8_t *p);
+uint32_t rd32(const uint8_t *p);
 
 /* geom.c */
 void cfw_geom_draw(customCfwContext *ctx, uint8_t type, uint8_t width, const int16_t *params);

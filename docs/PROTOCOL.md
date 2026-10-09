@@ -19,10 +19,20 @@ AA55 frame  (phone BLE transport)  -> payload after the business byte
         37 PUT      PUT_ASSET  [00][id u32][ver u32][kind u8][total u32][offset u32][len u16][data]
                     PUT_OBJECT [01][id u32][ver u32][shape record]
         38 SHOW     [38][epoch][request][flags][bg&0x0F][puts u8][puts entries, no length prefix][count u16][count×(id,ver)][ops]
-        39 HIDE     [39][epoch][request][flags][bg]
+                    flags: bit0 PRESENT (always on RayNeo), bit1 KEEP (count must be 0: ops only, active list kept),
+                           bit2 TAG (report SETTLED [request] once every animation this SHOW started has ended),
+                           bit3 FREEZE (stop every running animation at its current value first)
+                    ops (revision 4; id 0xffffffff = every active object for 2/3/4/6/7):
+                      [2][id u32][visible u8]                              VISIBLE
+                      [3][id][dx i16][dy i16]                              MOVE
+                      [4][id][dx i16][dy i16][frames u8][curve x4]         GLIDE
+                      [5][id][mask u16][frames u8][curve x4][i16 per bit]  TWEEN (bits 0-7 p0..p7, 0x100 color, 0x200 width)
+                      [6][id] FREEZE   [7][id] FINISH   [9][id]... ROTATE: refused (reason 3)
+                    A SHOW/HIDE repeating the last applied request id is acknowledged APPLIED without re-applying.
+        39 HIDE     [39][epoch][request][flags][bg]   (bit2 TAG → SETTLED [request] right away)
 ```
 
-Shape records (coords signed px on 540×180, clipped): the 13 geometry types
+Shape records (coords signed px on 540×180, clipped; `width` = stroke, byte 3): the 13 geometry types
 `LINE(1) RECT(2) RECT_FILL(3) CIRCLE(4) CIRCLE_FILL(5) TRI(6) TRI_FILL(7)
 QUAD(8) QUAD_FILL(9) BEZIER2(10) BEZIER3(11) ARC(12) PIE(13)` are 20 B
 (`[type][flags][gray][width]` + eight i16 params, the G2 shapes.h layouts,
@@ -39,7 +49,7 @@ ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/3"
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/4"
 PAGE  [13][state u8][reason u8]
 DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32]
 ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification relay, ancs.c)
@@ -49,7 +59,7 @@ ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification 
   as carried in every packet's second byte (RNLink strips the frame header
   before the business callback runs, so the phone repeats it).
 * `ordinal` = per-stream message counter (reset at RESET).
-* IDENT: `ver=3`, `w=540`, `h=180`, `maxChunk=240`, `storeKiB=64`, `revision=3`,
+* IDENT: `ver=4`, `w=540`, `h=180`, `maxChunk=240`, `storeKiB=64`, `revision=4`,
   `flags = 0x07` normally. Flag bits: **bit0** = zlib COMPRESSED records
   accepted (the stock inflater is used); **bit1** = raw packets accepted on
   business 0xF0; **bit2** = the heap context existed when IDENT was built
@@ -69,6 +79,10 @@ ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification 
   only after a QUERY on this connection; a notification that does not fit the
   free uplink slots is dropped whole. Testable only from an iPhone (macOS has
   no ANCS server).
+* SETTLED `[09][tag u16 LE]`: the request id of a TAG-flagged SHOW (or HIDE)
+  once every animation it started has ended, immediately when none did. The
+  frame timer runs at 33 ms (`CFW_ANIM_PERIOD_MS`); easing is a cubic bezier
+  `x1 y1 x2 y2` in /255, Q15 math as on the G2.
 * REPLY `status`: 0 APPLIED, 1 STALE (epoch mismatch), 2 MISSING (unknown id/ver),
   3 CAPACITY, 4 REFUSED.
 * GESTURE `eventType`: 0 single_tap, 1 swipe_up, 2 swipe_down, 3 double_tap,

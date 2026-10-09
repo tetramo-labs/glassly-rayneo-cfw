@@ -12,8 +12,8 @@
 #include "cfw.h"
 #include "rle.h"
 
-static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 static int16_t rds16(const uint8_t *p) { return (int16_t)rd16(p); }
 
 /* ---- store allocator (bump; the whole store is reset on RESET) ------------- */
@@ -34,7 +34,7 @@ static cfw_asset *asset_slot(customCfwContext *ctx) {
         if (!ctx->assets[i].id) return &ctx->assets[i];
     return 0;
 }
-static cfw_object *object_find(customCfwContext *ctx, uint32_t id) {
+cfw_object *object_find(customCfwContext *ctx, uint32_t id) {
     for (unsigned i = 0; i < CACHE_OBJECTS; i++)
         if (ctx->objects[i].id == id && id) return &ctx->objects[i];
     return 0;
@@ -47,6 +47,10 @@ static cfw_object *object_slot(customCfwContext *ctx) {
 
 void cfw_scene_reset(customCfwContext *ctx, uint8_t cap) {
     (void)cap;
+    cfw_anim_stop(ctx);
+    ctx->settle_pending = 0;
+    ctx->last_show_valid = 0;
+    ctx->bg = 0;
     for (unsigned i = 0; i < CACHE_ASSETS; i++) cfw_zero(&ctx->assets[i], sizeof(ctx->assets[i]));
     for (unsigned i = 0; i < CACHE_OBJECTS; i++) cfw_zero(&ctx->objects[i], sizeof(ctx->objects[i]));
     ctx->active_count = 0;
@@ -153,8 +157,11 @@ static int put_entry(customCfwContext *ctx, const uint8_t *e, uint32_t len) {
         if (!o) o = object_slot(ctx);
         if (!o) return ST_CAPACITY;
         uint32_t pid = o->id ? o->id : id;
+        uint8_t was_active = o->active;
         cfw_zero(o, sizeof(*o));
         o->id = pid; o->version = ver;
+        o->active = was_active;
+        o->flags = OBJ_VISIBLE;
         if (!shape_into(ctx, o, e + 9, len - 9)) { o->id = 0; return ST_REFUSED; }
         return ST_APPLIED;
     }
@@ -180,6 +187,9 @@ int cfw_scene_message(customCfwContext *ctx, const uint8_t *msg, uint32_t len,
     }
     if (epoch != ctx->stream.epoch) { *status = ST_STALE; return 1; }
 
+    /* a retried SHOW/HIDE never runs its motion twice */
+    if ((mode == MSG_SHOW || mode == MSG_HIDE) && ctx->last_show_valid && ctx->last_show_request == *request) return 1;
+
     if (mode == MSG_PUT) {
         uint32_t off = 0;
         while (off < blen) {
@@ -192,13 +202,21 @@ int cfw_scene_message(customCfwContext *ctx, const uint8_t *msg, uint32_t len,
         return 1;
     }
     if (mode == MSG_HIDE) {
+        uint8_t flags = blen >= 1 ? body[0] : 0;
+        cfw_anim_stop(ctx);
+        cfw_anim_freeze_all(ctx);
+        for (uint32_t i = 0; i < ctx->active_count; i++) ctx->objects[ctx->active_list[i]].active = 0;
         ctx->active_count = 0;
         cfw_scene_hide(ctx);
+        ctx->last_show_request = *request;
+        ctx->last_show_valid = 1;
+        if (flags & SHOW_FLAG_TAG) { cfw_anim_settled(ctx); ctx->settle_tag = *request; ctx->settle_pending = 1; }
+        cfw_anim_settled(ctx);
         return 1;
     }
     if (mode == MSG_SHOW) {
         if (blen < 3) { *status = ST_REFUSED; return 1; }
-        uint8_t puts = body[2];
+        uint8_t flags = body[0], bg = (uint8_t)(body[1] & 0x0f), puts = body[2];
         uint32_t off = 3;
         /* inline PUT entries carried in the SHOW, back to back with no length
          * prefix (G2CfwScene.showPayload); each entry's size follows from its
@@ -213,7 +231,10 @@ int cfw_scene_message(customCfwContext *ctx, const uint8_t *msg, uint32_t len,
         if (off + 2 > blen) { *status = ST_REFUSED; return 1; }
         uint16_t count = rd16(body + off); off += 2;
         if (count > CACHE_OBJECTS) { *status = ST_REFUSED; return 1; }
-        ctx->active_count = 0;
+        if ((flags & SHOW_FLAG_KEEP) && count) { *status = ST_REFUSED; return 1; }
+        /* resolve the references first; a missing one leaves the scene unchanged */
+        uint16_t next[CACHE_OBJECTS];
+        uint32_t refs = off;
         for (uint16_t i = 0; i < count; i++) {
             if (off + 8 > blen) { *status = ST_REFUSED; return 1; }
             uint32_t id = rd32(body + off);
@@ -221,9 +242,53 @@ int cfw_scene_message(customCfwContext *ctx, const uint8_t *msg, uint32_t len,
             off += 8;
             cfw_object *o = object_find(ctx, id);
             if (!o || o->version != ver) { *status = ST_MISSING; return 1; }
-            ctx->active_list[ctx->active_count++] = (uint16_t)(o - ctx->objects);
+            next[i] = (uint16_t)(o - ctx->objects);
+        }
+        (void)refs;
+        /* ops: syntax, then targets against the incoming active set */
+        uint32_t ops = off;
+        for (uint32_t pos = ops; pos < blen;) {
+            uint32_t n = cfw_op_len(body + pos, blen - pos);
+            if (!n) { *status = ST_REFUSED; return 1; }
+            pos += n;
+        }
+        if (!(flags & SHOW_FLAG_KEEP)) {
+            for (uint32_t i = 0; i < ctx->active_count; i++) ctx->objects[ctx->active_list[i]].active = 0;
+            for (uint16_t i = 0; i < count; i++) ctx->objects[next[i]].active = 1;
+        }
+        for (uint32_t pos = ops; pos < blen; pos += cfw_op_len(body + pos, blen - pos)) {
+            uint8_t reason;
+            if (cfw_op_check(ctx, body + pos, &reason) != ST_APPLIED) {
+                /* undo the active marks: the displayed scene is unchanged */
+                if (!(flags & SHOW_FLAG_KEEP)) {
+                    for (uint16_t i = 0; i < count; i++) ctx->objects[next[i]].active = 0;
+                    for (uint32_t i = 0; i < ctx->active_count; i++) ctx->objects[ctx->active_list[i]].active = 1;
+                }
+                *status = ST_REFUSED;
+                return 1;
+            }
+        }
+        if (!(flags & SHOW_FLAG_KEEP)) {
+            /* departing objects freeze; the new list is in paint order */
+            for (uint32_t i = 0; i < ctx->active_count; i++) {
+                cfw_object *o = &ctx->objects[ctx->active_list[i]];
+                if (!o->active) o->frames = 0, o->frame = 0;
+            }
+            for (uint16_t i = 0; i < count; i++) ctx->active_list[i] = next[i];
+            ctx->active_count = count;
+        }
+        if (flags & SHOW_FLAG_FREEZE) cfw_anim_freeze_all(ctx);
+        for (uint32_t pos = ops; pos < blen; pos += cfw_op_len(body + pos, blen - pos)) cfw_op_apply(ctx, body + pos);
+        ctx->bg = bg;
+        ctx->last_show_request = *request;
+        ctx->last_show_valid = 1;
+        if (flags & SHOW_FLAG_TAG) {
+            cfw_anim_settled(ctx);          /* a superseded tag reports now */
+            ctx->settle_tag = *request;
+            ctx->settle_pending = 1;
         }
         cfw_scene_render(ctx);
+        cfw_anim_arm(ctx);
         return 1;
     }
     return 0;
@@ -299,10 +364,11 @@ void cfw_scene_hide(customCfwContext *ctx) {
 
 void cfw_scene_render(customCfwContext *ctx) {
     if (!ctx->canvas_buf) return;
-    cfw_zero(ctx->canvas_buf, (uint32_t)CFW_W * CFW_H);
+    memset(ctx->canvas_buf, ctx->bg >= CFW_GRAY_ON ? CFW_PANEL_ON : 0, (uint32_t)CFW_W * CFW_H);
     labels_clear(ctx);
     for (uint16_t k = 0; k < ctx->active_count; k++) {
         cfw_object *o = &ctx->objects[ctx->active_list[k]];
+        if (!(o->flags & OBJ_VISIBLE)) continue;
         uint8_t gray = (uint8_t)(o->color & 0x0f);
         switch (o->type) {
         case SH_LINE: case SH_RECT: case SH_RECT_FILL: case SH_CIRCLE: case SH_CIRCLE_FILL:

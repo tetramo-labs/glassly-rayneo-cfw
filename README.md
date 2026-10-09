@@ -7,7 +7,7 @@ application image `nuttx_ap.bin` to add one thing: a Glassly link on BLE busines
 forwards touch/crown gestures back. It is the firmware counterpart of the
 phone-side RayNeo iO support in the Glassly repo.
 
-**Revision: `GLASSLYCFW-IO/3`.**
+**Revision: `GLASSLYCFW-IO/4`** (built, not yet flashed; revision 3 is the last build verified on hardware and the one the app bundles).
 
 > ⚠️ **Experimental.** Revision 3 is verified on a RayNeo iO (2026-10-09): it
 > answers QUERY with IDENT and DIAG from the RNLink receive callback, keeps its
@@ -33,7 +33,14 @@ phone-side RayNeo iO support in the Glassly repo.
   the 13 geometry records (lines, rounded rects, circles, triangles, quads,
   beziers, arcs, pies: the G2 rasterizer, `geom.c`) and IMAGE/TEXT_CACHED/
   TEXT_INLINE, rendered into a 540×180 L8 canvas (1-bit panel: gray ≥ 8 → on)
-  plus positioned `lv_label`s for text. No SVG paths, tweens or glides.
+  plus positioned `lv_label`s for text. Revision 4 adds the G2 SHOW ops
+  (`anim.c`: GLIDE, TWEEN, MOVE, VISIBLE, FREEZE, FINISH; KEEP/TAG/FREEZE
+  flags; SETTLED reports; 33 ms frame timer). No SVG paths or rotation.
+* Depth: the panel is binocular and the stock LCDC composer shifts each eye
+  by a signed parallax (`rayneo_fb_get_left/right_parallax`, set by the
+  launcher's display config `distance`, which the app drives through
+  `setDashboardPosition`). Per-element depth would need per-layer parallax in
+  that composer (`rayneo_lcdc_layer_fac_depth_update_partial`); not attempted.
 * ANCS relay: the iOS notifications the stock firmware reads over ANCS are
   forwarded to the phone as JSON (`ancs.c`, one retargeted call), so the
   Glassly App can show them its own way; the stock on-glass popup is untouched.
@@ -126,6 +133,7 @@ patches/
   ctx.c                 heap singleton; pointer kept in the module's RNLink registry entry
   geom.c scene.c        geometry rasterizer (G2 port); object cache + shape records + L8 render
   link.c                business 0xF0: RX callback, records, zlib, control, uplink; registration shim
+  anim.c                SHOW ops, easing, frame timer, SETTLED (G2 port, revision 4)
   page.c input.c ident.c  page lifecycle/lease, gesture capture, IDENT/DIAG/PAGE replies
   ancs.c                ANCS relay hook (notification JSON -> 0xF0 ANCS records)
   symbols.json          AP symbol table (name_ptr, address, tableOffset)

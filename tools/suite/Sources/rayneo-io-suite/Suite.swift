@@ -18,9 +18,12 @@ struct CaseResult {
 
 enum SuiteError: Error, CustomStringConvertible {
     case failed(String)
+    /// The firmware on the glasses predates what the case exercises.
+    case skipped(String)
     var description: String {
         switch self {
         case let .failed(why): why
+        case let .skipped(why): "skipped: \(why)"
         }
     }
 }
@@ -267,6 +270,80 @@ final class Suite {
             guard !ack.success else { throw SuiteError.failed("ACKed a bad CRC") }
             return "NACK"
         },
+        Case(id: "settle-now", group: "anim", title: "a TAG-flagged SHOW without motion reports SETTLED at once") { s in
+            try s.requireAnimation()
+            s.watcher.clear()
+            let record = s.rectRecord(filled: true, x: 40, y: 40, w: 60, h: 60, gray: 15)
+            try s.sendMessage(s.showMessage(puts: [s.putObject(id: 40, version: 1, record: record)], refs: [(40, 1)], flags: 0x05), compress: false)
+            let reply = try await s.cacheReply(timeout: 3)
+            guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(reply.summary) }
+            let tag = try await s.settled(timeout: 2)
+            guard tag == s.request else { throw SuiteError.failed("settled tag \(tag) != request \(s.request)") }
+            return "settled \(tag)"
+        },
+        Case(id: "glide", group: "anim", title: "GLIDE moves the rectangle over 15 frames, then SETTLED (visible)") { s in
+            try s.requireAnimation()
+            s.watcher.clear()
+            var op = Data([4]); op.append(s.le32(40)); op.append(s.le16(380)); op.append(s.le16(40)); op.append(15); op.append(contentsOf: [0, 0, 255, 255])
+            try s.sendMessage(s.showMessage(puts: [], refs: [(40, 1)], flags: 0x05, ops: [op]), compress: false)
+            let reply = try await s.cacheReply(timeout: 3)
+            guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(reply.summary) }
+            let t0 = Date()
+            let tag = try await s.settled(timeout: 4)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            guard tag == s.request else { throw SuiteError.failed("settled tag \(tag)") }
+            guard ms >= 300 else { throw SuiteError.failed("settled after \(ms) ms: no frames ran") }
+            return "settled after \(ms) ms"
+        },
+        Case(id: "tween", group: "anim", title: "TWEEN grows the rectangle with ease-in-out, then SETTLED (visible)") { s in
+            try s.requireAnimation()
+            s.watcher.clear()
+            var op = Data([5]); op.append(s.le32(40)); op.append(s.le16(0x1F)); op.append(30); op.append(contentsOf: [107, 0, 148, 255])
+            for v in [60, 20, 420, 140, 20] as [Int16] {
+                op.append(s.le16(v))
+            }
+            try s.sendMessage(s.showMessage(puts: [], refs: [(40, 1)], flags: 0x05, ops: [op]), compress: false)
+            let reply = try await s.cacheReply(timeout: 3)
+            guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(reply.summary) }
+            let t0 = Date()
+            let tag = try await s.settled(timeout: 5)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            guard tag == s.request, ms >= 700 else { throw SuiteError.failed("tag \(tag) after \(ms) ms") }
+            return "settled after \(ms) ms"
+        },
+        Case(id: "visible", group: "anim", title: "VISIBLE hides and shows the object (KEEP, ops only)") { s in
+            try s.requireAnimation()
+            for on: UInt8 in [0, 1] {
+                s.watcher.clear()
+                var op = Data([2]); op.append(s.le32(40)); op.append(on)
+                try s.sendMessage(s.showMessage(puts: [], refs: [], flags: 0x03, ops: [op]), compress: false)
+                let reply = try await s.cacheReply(timeout: 3)
+                guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed("visible=\(on): \(reply.summary)") }
+                try? await Task.sleep(nanoseconds: 700_000_000)
+            }
+            return "hidden, shown"
+        },
+        Case(id: "bad-op", group: "anim", title: "an op on an object outside the active set is REFUSED") { s in
+            try s.requireAnimation()
+            s.watcher.clear()
+            var op = Data([3]); op.append(s.le32(99)); op.append(s.le16(1)); op.append(s.le16(1))
+            try s.sendMessage(s.showMessage(puts: [], refs: [(40, 1)], flags: 0x01, ops: [op]), compress: false)
+            let reply = try await s.cacheReply(timeout: 3)
+            guard reply.status == G2CfwTransport.CacheReply.refused else { throw SuiteError.failed(reply.summary) }
+            return reply.summary
+        },
+        Case(id: "hide-tagged", group: "anim", title: "a TAG-flagged HIDE reports SETTLED") { s in
+            try s.requireAnimation()
+            s.watcher.clear()
+            var m = s.hideMessage(epoch: s.epoch)
+            m[m.startIndex + 5] = 0x05
+            try s.sendMessage(m, compress: false)
+            let reply = try await s.cacheReply(timeout: 3)
+            guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(reply.summary) }
+            let tag = try await s.settled(timeout: 2)
+            guard tag == s.request else { throw SuiteError.failed("settled tag \(tag)") }
+            return "settled"
+        },
         Case(id: "hide", group: "scene", title: "HIDE clears the page") { s in
             s.watcher.clear()
             try s.sendMessage(s.hideMessage(epoch: s.epoch), compress: false)
@@ -318,6 +395,9 @@ final class Suite {
                 let detail = try await c.body(self)
                 results.append(CaseResult(id: c.id, group: c.group, passed: true, detail: detail, seconds: Date().timeIntervalSince(start)))
                 print(String(format: "PASS  %-12@ %@", c.id as NSString, detail as NSString))
+            } catch let SuiteError.skipped(why) {
+                results.append(CaseResult(id: c.id, group: c.group, passed: true, detail: "skipped: \(why)", seconds: Date().timeIntervalSince(start)))
+                print(String(format: "SKIP  %-12@ %@", c.id as NSString, why as NSString))
             } catch {
                 results.append(CaseResult(id: c.id, group: c.group, passed: false, detail: "\(error)", seconds: Date().timeIntervalSince(start)))
                 print(String(format: "FAIL  %-12@ %@", c.id as NSString, "\(error)" as NSString))
@@ -339,6 +419,17 @@ final class Suite {
               let d = watcher.diags.first(where: { $0.source == source })
         else { throw SuiteError.failed("no DIAG source \(source) in \(timeout) s") }
         return d
+    }
+
+    private func requireAnimation() throws {
+        guard let ident = watcher.lastIdent else { throw SuiteError.skipped("no IDENT") }
+        guard ident.revision >= 4 else { throw SuiteError.skipped("needs revision 4, glasses run \(ident.revision)") }
+    }
+
+    private func settled(timeout: TimeInterval) async throws -> UInt16 {
+        guard await link.waitUntil(timeout: timeout, { !self.watcher.settled.isEmpty }), let tag = watcher.settled.first
+        else { throw SuiteError.failed("no SETTLED in \(timeout) s") }
+        return tag
     }
 
     private func page(timeout: TimeInterval) async throws -> RayNeoIOCfwLink.Page {
@@ -411,9 +502,9 @@ final class Suite {
         return m
     }
 
-    private func showMessage(puts: [Data], refs: [(UInt32, UInt32)]) -> Data {
+    private func showMessage(puts: [Data], refs: [(UInt32, UInt32)], flags: UInt8 = 0x01, ops: [Data] = []) -> Data {
         var m = header(38, epoch: epoch)
-        m.append(contentsOf: [0x00, 0x00, UInt8(puts.count)])
+        m.append(contentsOf: [flags, 0x00, UInt8(puts.count)])
         for p in puts {
             m.append(p) // back to back, no length prefix (G2CfwScene.showPayload)
         }
@@ -421,6 +512,9 @@ final class Suite {
         for (id, ver) in refs {
             m.append(le32(id))
             m.append(le32(ver))
+        }
+        for op in ops {
+            m.append(op)
         }
         return m
     }
@@ -464,12 +558,12 @@ final class Suite {
         return r
     }
 
-    private func le16(_ v: Int16) -> Data {
+    func le16(_ v: Int16) -> Data {
         let u = UInt16(bitPattern: v)
         return Data([UInt8(u & 0xFF), UInt8(u >> 8)])
     }
 
-    private func le32(_ v: UInt32) -> Data {
+    func le32(_ v: UInt32) -> Data {
         Data([UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8(v >> 24)])
     }
 }

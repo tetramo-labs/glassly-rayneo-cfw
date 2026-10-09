@@ -61,6 +61,7 @@ int cfw_page_open(customCfwContext *ctx, uint8_t *reason) {
 }
 
 void cfw_page_close(customCfwContext *ctx, uint8_t reason) {
+    cfw_anim_stop(ctx);
     if (ctx->page_root) fw_obj_add_flag(ctx->page_root, LV_FLAG_HIDDEN);
     cfw_scene_hide(ctx);
     ctx->page_open = 0;

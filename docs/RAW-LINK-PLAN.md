@@ -150,3 +150,24 @@ Same afternoon, two ports from the G2 CFW once the link was stable:
   records (kind 0x17, chunked) before the stock handler runs. The phone
   reassembles and feeds `phone_notification` like the G2 relay. Not testable
   from the Mac (no ANCS server); iPhone only.
+
+## Revision 4 (built 2026-10-09, not flashed) — animation, and what depth is here
+
+* `anim.c` ports the G2 object-cache animation: per-object from/to geometry,
+  color and width with a cubic-bezier easing, the SHOW ops VISIBLE/MOVE/GLIDE/
+  TWEEN/FREEZE/FINISH (ROTATE refused: no rotated primitives without the
+  vector engine), the KEEP/TAG/FREEZE SHOW flags, request-id dedupe, hidden
+  objects, background gray, a 33 ms LVGL frame timer and SETTLED reports.
+  The phone keeps element transitions for revision >= 4 (`RayNeoIOCfwSession`)
+  and still zeroes rotation and depth. The suite's `anim` cases run only on
+  revision 4 firmware and skip otherwise.
+* Depth: the RayNeo iO is binocular. The stock LCDC composer copies the one
+  540x180 framebuffer to each eye with a signed parallax byte
+  (`rayneo_fb_get_left_parallax` / `_right_parallax`, read by
+  `rayneo_lcdc_layer_update`), which the launcher's `display_config`
+  `distance` sets; the app already drives that through `setDashboardPosition`.
+  The G2's per-element depth (each lens its own SHOW, elements shifted by
+  depth × parallax) has no equivalent on a single canvas; the composer does
+  have per-layer depth (`rayneo_lcdc_layer_fac_depth_update_partial`), so an
+  element-depth design would mean one LVGL layer per depth level with its own
+  parallax. Display-driver work that cannot be done blind: parked.
