@@ -14,12 +14,12 @@ AA55 frame  (phone BLE transport)  -> payload after the business byte
     record stream  [flags][len u16 LE][crc u16 LE][body]   (3.3 L1)
       flags: 0x01 LENS, 0x04 COMPRESSED (zlib SYNC_FLUSH, body ends 00 00 FF FF), 0x08 RESET_CONTEXT
       crc = CRC-16/CCITT-FALSE(poly 0x1021, init 0xFFFF) of the DECODED message
-      messages (L2): [mode][epoch u16][request u16] body
-        0x41 RESET  [41][epoch][request][00][cap]
-        0x37 PUT    PUT_ASSET  [00][id u32][ver u32][kind u8][total u32][offset u32][len u16][data]
+      messages (L2): [mode][epoch u16][request u16] body   (modes are DECIMAL 37..41, as G2CfwTransport.isCacheMessage)
+        41 RESET    [41][epoch][request][00][cap]
+        37 PUT      PUT_ASSET  [00][id u32][ver u32][kind u8][total u32][offset u32][len u16][data]
                     PUT_OBJECT [01][id u32][ver u32][shape record]
-        0x38 SHOW   [38][epoch][request][flags][bg&0x0F][puts u8][puts entries][count u16][count×(id,ver)][ops]
-        0x39 HIDE   [39][epoch][request][flags][bg]
+        38 SHOW     [38][epoch][request][flags][bg&0x0F][puts u8][puts entries, no length prefix][count u16][count×(id,ver)][ops]
+        39 HIDE     [39][epoch][request][flags][bg]
 ```
 
 Shape records (coords signed px on 540×180, clipped): `RECT(2)`/`RECT_FILL(3)`
@@ -28,7 +28,7 @@ asset = `[w u8][h u8][4bpp RLE]`; RLE tokens `[cnt<<4|c]`, `[c][cnt u8]`,
 `[c][00][cnt u16]`. `ops` are always empty on RayNeo; no warm-up SHOW/TWEEN is
 sent — the first cache message after RESET is a real PUT or SHOW.
 
-## Replies (glasses → phone, business 0xF0, ≤192 B, one at a time ≥100 ms apart)
+## Replies (glasses → phone, business 0xF0, ≤192 B, one at a time ≥100 ms apart; kind bytes in hex: IDENT is 0x11, PAGE 0x13, DIAG 0x15)
 
 ```
 ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
@@ -59,7 +59,7 @@ DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][time
   3 CAPACITY, 4 REFUSED.
 * GESTURE `eventType`: 0 single_tap, 1 swipe_up, 2 swipe_down, 3 double_tap,
   11 tap_then_hold; `source` 0 touchpad/crown, 1 button.
-* PAGE `state` 1 open/0 closed; `reason` 0 ok, 1 launcher busy, 2 not paired,
+* PAGE `state` 1 open/0 closed; `reason` 0 ok, 1 launcher busy, 2 not paired (no longer sent),
   3 lease expired, 4 user backed out.
 
 ## Control / session rules the firmware enforces
@@ -70,7 +70,7 @@ DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][time
   second DIAG arrives through the normal queued uplink once the packet has
   crossed to the LVGL thread.
 * Cache messages (RESET/PUT/SHOW/HIDE) are **NACKed while the page is closed**.
-* **PAGE_OPEN** gates on `paired() && isBussinessIdle()`. Failure replies
+* **PAGE_OPEN** gates on `isBussinessIdle()` (the paired() gate was dropped: a guest-authenticated phone never reaches pair state 2). Failure replies
   `PAGE [0][reason]` (reason 1/2 are retried by the phone at 2/5/10 s); success
   replies `PAGE [1][0]`, arms the 120 s lease, and reports display activity.
 * **KEEPALIVE** renews the 120 s lease (`PAGE [1][0]`). The lease expiring, a

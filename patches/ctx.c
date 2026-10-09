@@ -3,16 +3,20 @@
  * The module has no .data/.bss, so the one pointer to the heap context must
  * live in RAM the stock image already owns. It lives in the module's OWN entry
  * of RNLink's callback registry: rnlink_if_register_callback copies the 32-byte
- * callback table into a 24-entry table (0x2c bytes each) and stores the caller's
- * `sub` word at +0x20 and the table pointer at +0x24. Verified by disassembly
- * (2026-10-08): the `sub` word is read only by rnlink_if_register_callback (the
- * duplicate check) and rnlink_if_unregister_callback (a match key); every
- * dispatcher (data, conn/bond/multipoint state, device info, send done, file)
- * keys on +0x24 and calls a slot only when it is non-NULL. So the entry whose
- * +0x24 is &cfw_rn_cbs is ours, and its +0x20 word is a free pointer-sized cell
- * that nothing ever calls. The registry address is the literal both
- * rnlink_if_register_callback and rnlink_if_on_data_recv load (asserted by
- * build.py and emitted as FWA_rnlink_registry).
+ * callback table into a 24-entry table (0x2c bytes each), stores the caller's
+ * `sub` word at +0x20, the constant 1 (in use) at +0x24 and the business byte
+ * at +0x28. Verified by disassembly (2026-10-08, +0x24 corrected on hardware
+ * 2026-10-09: revision 3's DIAG reported entry=0 because the scan compared +0x24
+ * with &cfw_rn_cbs; the registrar never stores that pointer). The `sub` word is
+ * read only by rnlink_if_register_callback (the duplicate check) and
+ * rnlink_if_unregister_callback (a match key); every dispatcher (data,
+ * conn/bond/multipoint state, device info, send done, file) checks +0x24 and
+ * calls a slot of the copy only when it is non-NULL. So the in-use entry whose
+ * business byte is 0xF0 and whose slot 0 is cfw_rx_data is ours, and its +0x20
+ * word is a free pointer-sized cell that nothing ever calls. The registry
+ * address is the literal both rnlink_if_register_callback and
+ * rnlink_if_on_data_recv load (asserted by build.py, emitted as
+ * FWA_rnlink_registry).
  *
  * Only the RNLink RX thread creates the context; the LVGL thread only peeks.
  */
@@ -20,8 +24,9 @@
 
 #define RN_ENTRIES 24u
 #define RN_STRIDE  0x2Cu
-#define RN_OFF_SUB 0x20u
-#define RN_OFF_CBS 0x24u
+#define RN_OFF_SUB  0x20u
+#define RN_OFF_USED 0x24u
+#define RN_OFF_BUS  0x28u
 
 void cfw_zero(void *p, uint32_t n) {
     volatile uint8_t *b = (volatile uint8_t *)p;
@@ -32,7 +37,10 @@ void cfw_zero(void *p, uint32_t n) {
 uint8_t *cfw_rn_entry(void) {
     uint8_t *e = (uint8_t *)(uintptr_t)FWA_rnlink_registry;
     for (uint32_t i = 0; i < RN_ENTRIES; i++, e += RN_STRIDE) {
-        if (*(const void *volatile *)(e + RN_OFF_CBS) == (const void *)&cfw_rn_cbs) return e;
+        if (*(const uint32_t volatile *)(e + RN_OFF_USED) == 0) continue;
+        if (*(const uint8_t volatile *)(e + RN_OFF_BUS) != BIZ_GLASSLY) continue;
+        if (*(const void *volatile *)e != cfw_rn_cbs.slot[0]) continue;
+        return e;
     }
     return 0;
 }

@@ -2,7 +2,7 @@
  * demand, with a 120 s lease renewed by KEEPALIVE and a 100 ms service timer.
  *
  * Everything here runs on the launcher UI thread (reached from the message pump,
- * never from the RX callback). A phone-initiated open is gated on paired + the
+ * never from the RX callback). A phone-initiated open is gated on the
  * launcher being idle; the carousel-item entry ("Glassly") is deferred to a
  * device-validated build (see docs/HOOKS.md).
  */
@@ -45,7 +45,10 @@ void cfw_page_ensure_timer(customCfwContext *ctx) {
 }
 
 int cfw_page_open(customCfwContext *ctx, uint8_t *reason) {
-    if (!fw_paired()) { *reason = PAGE_UNPAIRED; return 0; }
+    /* No paired() gate: real_get_rnlink_paired_status is true only for a
+     * device-info pair state of 2, which a guest-authenticated phone never
+     * reaches (every PAGE_OPEN was refused with reason 2 on hardware,
+     * 2026-10-09). The handshake that delivered this packet is the proof. */
     if (!fw_business_idle()) { *reason = PAGE_BUSY; return 0; }
     cfw_page_ensure_ui(ctx);
     if (!ctx->page_root) { *reason = PAGE_BUSY; return 0; }

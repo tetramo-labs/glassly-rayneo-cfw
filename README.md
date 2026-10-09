@@ -9,15 +9,17 @@ phone-side RayNeo iO support in the Glassly repo.
 
 **Revision: `GLASSLYCFW-IO/3`.**
 
-> ⚠️ **Barely verified on hardware.** Revisions 1 and 2 flashed, booted and
-> OTA-confirmed on a RayNeo iO (2026-10-07/09) but never answered the phone.
-> Revision 3 answers IDENT straight from the RNLink receive callback, keeps its
-> state pointer in its own RNLink registry entry instead of a launcher view, and
-> adds a DIAG reply so the next flash reports what happened. Flashing can brick the device
-> and there is no verified recovery path. Read [`docs/SAFETY.md`](docs/SAFETY.md)
-> first. The protocol knowledge here comes from prior firmware analysis of the
-> stock image; the object cache and RLE code are derived from the sibling Even
-> Realities G2 Glassly CFW sources.
+> ⚠️ **Experimental.** Revision 3 is verified on a RayNeo iO (2026-10-09): it
+> answers QUERY with IDENT and DIAG from the RNLink receive callback, keeps its
+> state pointer in its own RNLink registry entry, opens the Glassly page and
+> renders cache-protocol scenes. Four defects found on hardware that day
+> (registry lookup, a double free in the message handler, the paired gate,
+> hex/decimal message modes) are fixed and guarded by the on-device suite in
+> `tools/suite`. Flashing can brick the device and there is no verified
+> recovery path. Read [`docs/SAFETY.md`](docs/SAFETY.md) first. The protocol
+> knowledge here comes from prior firmware analysis of the stock image; the
+> object cache and RLE code are derived from the sibling Even Realities G2
+> Glassly CFW sources.
 
 ## What it does
 
@@ -100,7 +102,13 @@ no verified recovery path.
 ```
 ./venv/bin/python -m pytest tools/            # protocol codecs + state machine
 ./venv/bin/python patches/apply_patches.py --verify   # patch replay round-trip
+cd tools/suite && swift run rayneo-io-suite   # on the glasses: link, cfw, page, scene (after every flash)
 ```
+
+Flash and poke at the glasses from a Mac with the Glassly SDK's harness
+(`glassly/mobile/modules/bluetooth-sdk/tools/rayneo-io-mac`: `rayneo-io flash
+cfw`, `probe`, `monitor`); the suite reuses its driver. See
+[`tools/suite/README.md`](tools/suite/README.md).
 
 ## Repo layout
 
@@ -125,6 +133,7 @@ tools/
   ota_pack.py           deterministic OTA (un)packer; rewrites the AP manifest row
   probe.py              bleak: scan, version exchange, QUERY -> IDENT, test frame
   test_protocol.py      pytest: CRCs, AA55 frame, RLE, packet/record/cache model
+  suite/                Swift: the on-device acceptance suite (needs ../glassly beside this repo)
 docs/                   PROTOCOL.md, HOOKS.md, SAFETY.md
 cache/ build/ venv/     gitignored
 ```

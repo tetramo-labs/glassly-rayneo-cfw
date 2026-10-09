@@ -144,10 +144,10 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define REC_COMPRESSED  0x04u
 #define REC_RESET_CTX   0x08u
 /* message modes (L2) */
-#define MSG_RESET 0x41u
-#define MSG_PUT   0x37u
-#define MSG_HIDE  0x39u
-#define MSG_SHOW  0x38u
+#define MSG_RESET 41u   /* decimal, as the phone's G2CfwScene/G2CfwTransport (37..41) */
+#define MSG_PUT   37u
+#define MSG_HIDE  39u
+#define MSG_SHOW  38u
 /* PUT entry kinds */
 #define PUT_ASSET  0x00u
 #define PUT_OBJECT 0x01u
@@ -339,7 +339,8 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl);
 #define TIO_MSG_ID 0x54494d47u     /* 'TIMG' */
 typedef struct {
     uint32_t id;
-    const uint8_t *data;           /* passed through as-is when mode == 0 */
+    const uint8_t *data;           /* mode 0: passed through and os_free'd by
+                                      release_message_data after the handler */
     uint32_t bytes, reserved;
     void *context;
     uint8_t mode, padding[3];      /* 0 or 1; the queue refuses anything else */
@@ -349,7 +350,7 @@ typedef struct {
  * 0 data(bus, data, len)  1 conn state  2 multipoint  3 bond  4 device info
  * 5 send done  6 file received  7 data_ex(bus, data, len, flag) */
 typedef struct { void *slot[8]; } cfw_rn_callbacks;
-/* The module's table (link.c); its address identifies our registry entry (ctx.c). */
+/* The module's table (link.c); its slot 0 identifies our registry entry (ctx.c). */
 extern const cfw_rn_callbacks cfw_rn_cbs;
 
 #endif /* GLASSLY_CFW_H */

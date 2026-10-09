@@ -189,7 +189,7 @@ def test_rle_long_run():
 
 
 # ------------------- record + message state-machine model -------------------
-MSG_RESET, MSG_PUT, MSG_SHOW, MSG_HIDE = 0x41, 0x37, 0x38, 0x39
+MSG_RESET, MSG_PUT, MSG_SHOW, MSG_HIDE = 41, 37, 38, 39
 PUT_ASSET, PUT_OBJECT = 0x00, 0x01
 ST_APPLIED, ST_STALE, ST_MISSING, ST_CAPACITY, ST_REFUSED = 0, 1, 2, 3, 4
 REC_LENS, REC_COMPRESSED, REC_RESET_CTX = 0x01, 0x04, 0x08

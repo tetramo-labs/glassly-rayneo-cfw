@@ -1,13 +1,16 @@
 # SAFETY — read before flashing
 
 **Hardware status (2026-10-09):** revisions 1 and 2 flashed over the Glassly
-App's OTA flow, booted, reported `OtaValidationConfirmed` and reconnected; the
-launcher kept answering general-status requests (business 15, the same RNLink
-registry path the module uses). Neither answered the phone's QUERY. Revision 3
-removes the two remaining unverified links in that chain (the launcher-view
-state pointer and the LVGL hop before IDENT) and adds a DIAG reply; it has not
-been flashed. Flashing is still experimental and can brick your glasses. If a
-phone-side change can do what you need, do that instead.
+App's OTA flow, booted, reported `OtaValidationConfirmed` and reconnected, but
+never answered the phone's QUERY. Revision 3, iterated the same day from a Mac
+with the SDK harness, answers IDENT and DIAG, survives repeated queries, opens
+the page and applies RESET/SHOW/HIDE; `tools/suite` is the acceptance run. The
+day's findings: the registry lookup keyed on a pointer the registrar never
+stores, the message handler freed a buffer the queue frees too (the glasses
+reset ~10 s after every QUERY), the paired gate can never pass for a guest
+link, and IDENT/PAGE kinds and the cache message modes were hex on one side and
+decimal on the other. Flashing is still experimental and can brick your
+glasses. If a phone-side change can do what you need, do that instead.
 
 ## What is and is not verified
 

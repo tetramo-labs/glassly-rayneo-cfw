@@ -32,7 +32,7 @@ found:
 
 * `rnlink_if_register_callback(const void *cbs32, uint32_t sub, uint8_t bus)`
   @ `0x107763dd`: 24-entry table at `0x1987c780`, entry 0x2c bytes =
-  `{cbs copy[0x20], sub @0x20, cbs* @0x24, bus @0x28}`. Slots: 0 data(bus,
+  `{cbs copy[0x20], sub @0x20, in-use flag @0x24, bus @0x28}`. Slots: 0 data(bus,
   data, len) — only when the frame is complete; 1 conn state; 2 multipoint;
   3 bond; 4 device info; 5 send done; 6 file received(file*) for every table;
   7 data_ex(bus, data, len, flag). Business byte compared with `ldrb`, so
@@ -112,3 +112,27 @@ sent synchronously from the RX callback before the LVGL hop, and a second DIAG
 is queued from the LVGL handler. Phone: logs DIAG, minimum revision 3, Android
 re-probes after a flash (its probe at the post-reboot reconnect was blocked by
 the still-active flasher).
+
+## 2026-10-09 — revision 3 on hardware, iterated from a Mac
+
+Flashing and probing moved to the SDK's Mac harness
+(`glassly/mobile/modules/bluetooth-sdk/tools/rayneo-io-mac`), which runs the
+same `RayNeoIOProtocol` / `RayNeoIOFlasher` / `G2CfwTransport` sources as the
+app; `tools/suite` here is the acceptance run. Six flashes in one afternoon:
+
+1. `entry=0 ctx=0` in DIAG: `rnlink_if_register_callback` stores the constant
+   1 at +0x24 (in use), not the table pointer. Lookup now keys on in-use +
+   business 0xF0 + slot 0.
+2. The glasses reset ~10 s after every QUERY: `release_message_data` frees a
+   mode-0 message's data after the handler, and `cfw_ui_handler` freed it too.
+3. PAGE_OPEN refused with reason 2: `real_get_rnlink_paired_status` is
+   device-info pair state == 2, never true for a guest-authenticated phone.
+   Gate dropped.
+4. Phone/firmware byte mismatches from reading `[11]`/`[13]` and `0x41`.. as
+   the other radix: IDENT/PAGE kinds are 0x11/0x13 (the SDK had 11/13), the
+   cache message modes are decimal 37..41 (the firmware had 0x37..0x41), and
+   SHOW's inline PUT entries carry no length prefix (G2CfwScene.showPayload).
+
+Also: macOS CoreBluetooth can leave `canSendWriteWithoutResponse` false for
+good; the harness forces queued writes after 2 s (the glasses re-request a
+slice after 20 s, four misses abort the OTA with errcode 8).

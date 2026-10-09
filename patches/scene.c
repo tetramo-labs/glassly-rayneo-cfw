@@ -96,6 +96,28 @@ static int shape_into(customCfwContext *ctx, cfw_object *o, const uint8_t *rec, 
 }
 
 /* ---- PUT entry ------------------------------------------------------------- */
+/* Byte length of one PUT entry (asset or object) at e, or 0 when it cannot be
+ * sized within `avail`. Geometry records (types 1..13) are 4 + 8 i16 = 20 B
+ * (G2CfwScene.Slot pads params to 8); IMAGE/TEXT 12, TEXT_CACHED 16,
+ * TEXT_INLINE 13 + len, PATH 12 + count. */
+static uint32_t put_entry_len(const uint8_t *e, uint32_t avail) {
+    if (avail < 1) return 0;
+    if (e[0] == PUT_ASSET) {
+        if (avail < 20) return 0;
+        return 20u + rd16(e + 18);
+    }
+    if (e[0] != PUT_OBJECT || avail < 10) return 0;
+    uint8_t type = e[9];
+    uint32_t rlen;
+    if (type >= 1 && type <= 13) rlen = 20;
+    else if (type == SH_IMAGE || type == 15) rlen = 12;
+    else if (type == SH_TEXT_CACHED) rlen = 16;
+    else if (type == SH_TEXT_INLINE) { if (avail < 9 + 13) return 0; rlen = 13u + e[9 + 12]; }
+    else if (type == 18) { if (avail < 9 + 12) return 0; rlen = 12u + rd16(e + 9 + 10); }
+    else return 0;
+    return 9u + rlen;
+}
+
 static int put_entry(customCfwContext *ctx, const uint8_t *e, uint32_t len) {
     if (len < 1) return ST_REFUSED;
     uint8_t kind = e[0];
@@ -176,12 +198,12 @@ int cfw_scene_message(customCfwContext *ctx, const uint8_t *msg, uint32_t len,
         if (blen < 3) { *status = ST_REFUSED; return 1; }
         uint8_t puts = body[2];
         uint32_t off = 3;
-        /* inline PUT entries carried in the SHOW */
+        /* inline PUT entries carried in the SHOW, back to back with no length
+         * prefix (G2CfwScene.showPayload); each entry's size follows from its
+         * kind and record type */
         for (uint8_t i = 0; i < puts && off < blen; i++) {
-            /* each inline entry is a full PUT entry preceded by a u16 length */
-            if (off + 2 > blen) { *status = ST_REFUSED; return 1; }
-            uint16_t elen = rd16(body + off); off += 2;
-            if (off + elen > blen) { *status = ST_REFUSED; return 1; }
+            uint32_t elen = put_entry_len(body + off, blen - off);
+            if (!elen || off + elen > blen) { *status = ST_REFUSED; return 1; }
             uint8_t r = (uint8_t)put_entry(ctx, body + off, elen);
             if (r != ST_APPLIED) { *status = r; return 1; }
             off += elen;

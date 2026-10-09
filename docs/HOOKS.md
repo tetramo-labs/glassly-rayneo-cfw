@@ -32,16 +32,19 @@ The module has no `.data`/`.bss`, so its one pointer to the heap context needs
 a writable word the stock image owns. Since revision 3 that word is the `sub`
 field (+0x20) of the module's own entry in the RNLink callback registry: the
 registrar copies the 32-byte table into a free 0x2c-byte entry, stores `sub`
-at +0x20, the table pointer at +0x24 and the business byte at +0x28. Every
-dispatcher (`rnlink_if_on_data_recv`, `_on_conn_state`, `_on_bond_state`,
+at +0x20, the constant 1 (in use) at +0x24 and the business byte at +0x28.
+Every dispatcher (`rnlink_if_on_data_recv`, `_on_conn_state`, `_on_bond_state`,
 `_on_multipoint_conn_state`, `_on_device_info`, `_on_send_done`,
-`_on_file_recv`) keys on +0x24 and calls a slot only when it is non-NULL; the
-`sub` word is read only by the registrar's duplicate check and by
-`rnlink_if_unregister_callback` as a match key. `ctx.c` finds the entry whose
-+0x24 is `&cfw_rn_cbs` and keeps `ctx*` at its +0x20. Because the stored
-pointer defeats the duplicate check, `cfw_boot_register` skips registration
-when the entry already exists (`LinkMonitor::doStartMonitoring` can call
-`registerLinkCallback` more than once).
+`_on_file_recv`) checks +0x24 and calls a slot of the copy only when it is
+non-NULL; the `sub` word is read only by the registrar's duplicate check and by
+`rnlink_if_unregister_callback` as a match key. `ctx.c` finds the in-use entry
+whose business byte is 0xF0 and whose slot 0 is `cfw_rx_data`, and keeps
+`ctx*` at its +0x20. (Revision 3 as first flashed compared +0x24 with
+`&cfw_rn_cbs` — the registrar never stores that pointer — and its DIAG reported
+`entry=0`; fixed the same day.) Because the stored pointer defeats the
+duplicate check, `cfw_boot_register` skips registration when the entry already
+exists (`LinkMonitor::doStartMonitoring` can call `registerLinkCallback` more
+than once).
 
 Revisions 1–2 kept the pointer in a 32-byte tail added to the launcher's
 `AppListView` (allocation 0xdc→0xfc at `0x1079fe2c`, reached through
@@ -72,7 +75,7 @@ at `0x10681xxx` has no matching init and is deliberately not used.
 
 `rnlink_if_register_callback(cbs, sub, business)` (`0x107763dd`) copies a
 32-byte callback table into a 24-entry registry at `0x1987c780` (entry 0x2c
-bytes: table copy, `sub` @0x20, `cbs*` @0x24, business byte @0x28). Slot 0 is
+bytes: table copy, `sub` @0x20, in-use flag (1) @0x24, business byte @0x28). Slot 0 is
 `data(bus, data, len)`, called by `rnlink_if_on_data_recv` for every entry whose
 business byte matches, with no business filtering upstream except the handshake
 (0x10) and 0x11. The launcher registers tables for 15 and 18 from
@@ -88,8 +91,12 @@ handler, and a taken id is refused with -3 without side effects, so the module
 registers 5, then 3, lazily on the first frame. The queued record copies
 `{id, data, bytes, reserved, context, mode}` and the C handler is called as
 `handler(msg, user)` from `message_processor_handle`, an LVGL timer created by
-`message_processor_init` — the LVGL thread. LVGL is built without OS locking,
-so timers are only ever created from that handler.
+`message_processor_init` — the LVGL thread. Mode 0 hands the `data` pointer to
+the queue: `release_message_data` `os_free`s it after the handler returns
+(mode 1 makes a malloc'd copy instead), so the handler must not free it —
+revision 3 as first flashed did, and the double free reset the glasses about
+10 s after every QUERY (found 2026-10-09 with the Mac harness). LVGL is built
+without OS locking, so timers are only ever created from that handler.
 
 The stock file transfer is not usable as a downlink: business-18 payloads reach
 `onBigCoreFileRecvCallback`, which only logs, and the phone's INFO is never
@@ -122,4 +129,5 @@ reply reports the registry entry, context, module id and return codes.
    positioned `lv_label`s with the default LVGL font instead.
 5. **Carousel item** ("Glassly" launcher entry) is **deferred**: the native menu
    method-replacement addresses need disassembly verification. Pages open only
-   on PAGE_OPEN, gated on `paired() && isBussinessIdle()`.
+   on PAGE_OPEN, gated on `isBussinessIdle()` (`real_get_rnlink_paired_status`
+   needs device-info pair state 2, which guest authentication never yields).

@@ -249,7 +249,10 @@ static void cfw_ui_handler(void *arg, void *user) {
         cfw_packet(ctx, m->data[0], m->data[1], m->data + 2, m->bytes - 2);
         cfw_uplink_flush(ctx);
     }
-    fw_free((void *)m->data);   /* release the RX-thread deep copy */
+    /* m->data (the RX-thread copy) is freed by message_processor_handle's
+     * release_message_data once this returns: mode 0 hands ownership to the
+     * queue. Freeing it here too was revision 3's double free (the glasses
+     * reset ~10 s after every QUERY). */
 }
 
 /* ======================= RNLink thread: business 0xF0 ======================= */
@@ -285,7 +288,7 @@ static void cfw_rx_data(uint32_t bus, const uint8_t *data, uint32_t len) {
     msg.mode = 0;
     int rc = fw_msg_send(ctx->ui_module, &msg);
     ctx->ui_send_rc = (int8_t)rc;
-    if (rc != 0) fw_free(copy);
+    if (rc != 0) fw_free(copy);   /* not queued: still ours */
 }
 
 /* Registered by the boot shim; RNLink copies the 32 bytes. Only slot 0 is used.

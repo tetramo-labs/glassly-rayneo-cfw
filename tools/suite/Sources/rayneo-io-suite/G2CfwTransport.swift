@@ -1,0 +1,1 @@
+../../../../../glassly/mobile/modules/bluetooth-sdk/ios/Source/sgcs/G2CfwTransport.swift
