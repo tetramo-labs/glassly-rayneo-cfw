@@ -46,6 +46,20 @@ static inline int fw_rnlink_register(const void *cbs, uint32_t sub, uint32_t bus
 }
 static inline int fw_business_idle(void) { return FW(int (*)(void), FWA_launcher_is_business_idle)(); }
 static inline int fw_paired(void) { return FW(int (*)(void), FWA_rnlink_paired_status)(); }
+/* Launcher input (verified 2026-10-09 by disassembly): the crown is not an
+ * LVGL indev. AppListView registers a raw wheel listener with
+ * InputEventMonitor::registerRawWheelListener(monitor, fn, user), which
+ * calls fn(user, delta) with raw wheel units (~600 per detent). */
+static inline void *fw_input_monitor(void) {
+    void *mm = FW(void *(*)(void), FWA_monitor_manager_instance)();
+    return mm ? FW(void *(*)(void *), FWA_monitor_manager_input)(mm) : 0;
+}
+static inline int fw_wheel_register(void *monitor, void *fn, void *user) {
+    return FW(int (*)(void *, void *, void *), FWA_input_register_wheel)(monitor, fn, user);
+}
+static inline int fw_wheel_unregister(void *monitor, void *fn, void *user) {
+    return FW(int (*)(void *, void *, void *), FWA_input_unregister_wheel)(monitor, fn, user);
+}
 static inline void fw_report_activity(void) { FW(void (*)(void), FWA_display_report_activity)(); }
 
 /* LVGL (v9). lv_obj_t / lv_timer_t / lv_display_t are opaque to us. */
@@ -55,6 +69,8 @@ static inline void fw_obj_set_size(void *o, int32_t w, int32_t h) { FW(void (*)(
 static inline void fw_obj_set_pos(void *o, int32_t x, int32_t y) { FW(void (*)(void *, int32_t, int32_t), FWA_lv_obj_set_pos)(o, x, y); }
 static inline void fw_obj_add_flag(void *o, uint32_t f) { FW(void (*)(void *, uint32_t), FWA_lv_obj_add_flag)(o, f); }
 static inline void fw_obj_remove_flag(void *o, uint32_t f) { FW(void (*)(void *, uint32_t), FWA_lv_obj_remove_flag)(o, f); }
+static inline void fw_obj_remove_style_all(void *o) { FW(void (*)(void *), FWA_lv_obj_remove_style_all)(o); }
+static inline void fw_obj_set_scrollbar_mode(void *o, uint8_t m) { FW(void (*)(void *, uint8_t), FWA_lv_obj_set_scrollbar_mode)(o, m); }
 static inline void fw_obj_invalidate(void *o) { FW(void (*)(void *), FWA_lv_obj_invalidate)(o); }
 static inline void fw_obj_align(void *o, uint8_t a, int32_t x, int32_t y) { FW(void (*)(void *, uint8_t, int32_t, int32_t), FWA_lv_obj_align)(o, a, x, y); }
 static inline void *fw_canvas_create(void *parent) { return FW(void *(*)(void *), FWA_lv_canvas_create)(parent); }
@@ -102,6 +118,8 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 /* ---- LVGL constants we rely on (v9) ---------------------------------------- */
 #define LV_CF_L8          6u      /* lv_color_format L8, per the display runtime */
 #define LV_FLAG_HIDDEN    (1u << 0)
+#define LV_FLAG_SCROLLABLE (1u << 4)     /* lv_obj_flag_t, v9 */
+#define LV_SCROLLBAR_OFF  0u
 #define LV_EVENT_KEY_CODE 0x0eu
 #define KEY_CLICK         0x3au
 #define KEY_LONG          0x3bu
@@ -330,6 +348,7 @@ typedef struct {
     uint8_t uplink_head, uplink_tail;
     uint32_t last_uplink_tick;
 
+    uint8_t wheel_listening;       /* raw wheel listener registered with InputEventMonitor */
     /* gestures */
     uint32_t last_click_tick;
     int32_t crown_accum;
@@ -371,6 +390,7 @@ void cfw_page_tick(customCfwContext *ctx);
 
 /* input.c */
 void cfw_input_attach(customCfwContext *ctx, void *root);
+void cfw_input_wheel_listen(customCfwContext *ctx, int on);
 void cfw_gesture(customCfwContext *ctx, uint8_t type, uint8_t source);
 
 /* ident.c */

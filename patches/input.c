@@ -62,3 +62,31 @@ static void cfw_event_cb(void *e) {
 void cfw_input_attach(customCfwContext *ctx, void *root) {
     fw_add_event_cb(root, (void *)cfw_event_cb, 0 /* LV_EVENT_ALL */, ctx);
 }
+
+/* Raw wheel listener (InputEventMonitor): delta in raw units, detents of
+ * CROWN_PER_DETENT, one swipe gesture per detent. */
+static void cfw_wheel_cb(void *user, int32_t delta) {
+    customCfwContext *ctx = cfw_ctx_peek();
+    (void)user;
+    if (!ctx || !ctx->page_open || !delta) return;
+    ctx->crown_accum += delta;
+    while (ctx->crown_accum >= CROWN_PER_DETENT) {
+        cfw_gesture(ctx, GEST_SWIPE_UP, 0);
+        ctx->crown_accum -= CROWN_PER_DETENT;
+    }
+    while (ctx->crown_accum <= -CROWN_PER_DETENT) {
+        cfw_gesture(ctx, GEST_SWIPE_DOWN, 0);
+        ctx->crown_accum += CROWN_PER_DETENT;
+    }
+}
+
+void cfw_input_wheel_listen(customCfwContext *ctx, int on) {
+    void *monitor = fw_input_monitor();
+    if (!monitor) return;
+    if (on && !ctx->wheel_listening) {
+        if (fw_wheel_register(monitor, (void *)cfw_wheel_cb, ctx)) ctx->wheel_listening = 1;
+    } else if (!on && ctx->wheel_listening) {
+        fw_wheel_unregister(monitor, (void *)cfw_wheel_cb, ctx);
+        ctx->wheel_listening = 0;
+    }
+}

@@ -21,6 +21,12 @@ void cfw_page_ensure_ui(customCfwContext *ctx) {
     if (!screen) return;
     void *root = fw_obj_create(screen);
     if (!root) return;
+    /* a bare container: the theme's border, padding, radius and background
+     * drew a frame around the page (thick top/left from the padding, thin
+     * bottom/right from the border) and offset the canvas */
+    fw_obj_remove_style_all(root);
+    fw_obj_remove_flag(root, LV_FLAG_SCROLLABLE);
+    fw_obj_set_scrollbar_mode(root, LV_SCROLLBAR_OFF);
     fw_obj_set_size(root, CFW_W, CFW_H);
     fw_obj_set_pos(root, 0, 0);
     fw_obj_add_flag(root, LV_FLAG_HIDDEN);
@@ -54,6 +60,8 @@ int cfw_page_open(customCfwContext *ctx, uint8_t *reason) {
     if (!ctx->page_root) { *reason = PAGE_BUSY; return 0; }
     fw_obj_remove_flag(ctx->page_root, LV_FLAG_HIDDEN);
     ctx->page_open = 1;
+    ctx->crown_accum = 0;
+    cfw_input_wheel_listen(ctx, 1);
     ctx->lease_deadline = fw_tick() + PAGE_LEASE_MS;
     fw_report_activity();
     *reason = PAGE_OK;
@@ -62,6 +70,7 @@ int cfw_page_open(customCfwContext *ctx, uint8_t *reason) {
 
 void cfw_page_close(customCfwContext *ctx, uint8_t reason) {
     cfw_anim_stop(ctx);
+    cfw_input_wheel_listen(ctx, 0);
     if (ctx->page_root) fw_obj_add_flag(ctx->page_root, LV_FLAG_HIDDEN);
     cfw_scene_hide(ctx);
     ctx->page_open = 0;

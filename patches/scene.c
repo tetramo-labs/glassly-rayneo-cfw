@@ -300,30 +300,64 @@ static void px_on(customCfwContext *ctx, int x, int y) {
     ctx->canvas_buf[(uint32_t)y * CFW_W + (uint32_t)x] = CFW_PANEL_ON;
 }
 
-static void draw_image(customCfwContext *ctx, cfw_object *o) {
-    cfw_asset *a = asset_find(ctx, o->asset_id);
-    if (!a || !(a->state & 1) || a->length < 2) return;
-    const uint8_t *img = ctx->store + a->offset;
+/* Blit one cached image `[w u8][h u8][4bpp RLE]` (len bytes) at (x, y):
+ * decoded into a scratch region at the store tail (not persisted), gray
+ * thresholded to on. Returns the image width, 0 when it did not decode. */
+static uint32_t blit_image(customCfwContext *ctx, const uint8_t *img, uint32_t len, int x, int y) {
+    if (len < 2) return 0;
     uint32_t iw = img[0], ih = img[1];
-    if (!iw || !ih || iw > 255 || ih > 255) return;
+    if (!iw || !ih) return 0;
     uint32_t rowbytes = (iw + 1u) / 2u;
     uint32_t need = rowbytes * ih;
-    /* decode 4bpp RLE into a scratch region at the store tail (not persisted) */
     uint32_t scratch = (ctx->store_used + 15u) & ~15u;
-    if (scratch + need > CFW_STORE_BYTES) return;
+    if (scratch + need > CFW_STORE_BYTES) return 0;
     uint8_t *dst = ctx->store + scratch;
     cfw_zero(dst, need);
     rle_state rs;
     rle_init(&rs, dst, rowbytes, rowbytes, ih);
-    rle_feed(&rs, img + 2, a->length - 2);
-    if (rs.err) return;
+    rle_feed(&rs, img + 2, len - 2);
+    if (rs.err) return 0;
     for (uint32_t j = 0; j < ih; j++) {
         for (uint32_t i = 0; i < iw; i++) {
             uint8_t b = dst[j * rowbytes + (i >> 1)];
             uint8_t g = (i & 1) ? (b >> 4) : (b & 0x0f);
-            if (g >= CFW_GRAY_ON) px_on(ctx, o->x + (int)i, o->y + (int)j);
+            if (g >= CFW_GRAY_ON) px_on(ctx, x + (int)i, y + (int)j);
         }
     }
+    return iw;
+}
+
+static void draw_image(customCfwContext *ctx, cfw_object *o) {
+    cfw_asset *a = asset_find(ctx, o->asset_id);
+    if (!a || !(a->state & 1) || a->length < 2) return;
+    blit_image(ctx, ctx->store + a->offset, a->length, o->x, o->y);
+}
+
+/* TEXT_CACHED with a font asset (`[96 x u32 glyph offsets][glyph images]`,
+ * G2 texture_cache.h): draw the string asset's bytes glyph by glyph, as the
+ * G2's cfw_texture_draw_string_region does. Bytes 1..31 are kerning
+ * (x += byte - 11); 32..127 index the table. 1 when drawn, 0 to fall back. */
+#define FONT_TABLE_CHARS 96u
+#define FONT_TABLE_BYTES (FONT_TABLE_CHARS * 4u)
+static int draw_cached_font_text(customCfwContext *ctx, cfw_object *o) {
+    cfw_asset *s = asset_find(ctx, o->asset_id);
+    cfw_asset *f = o->font_id ? asset_find(ctx, o->font_id) : 0;
+    if (!s || !(s->state & 1) || !f || !(f->state & 1) || f->length < FONT_TABLE_BYTES) return 0;
+    const uint8_t *font = ctx->store + f->offset;
+    const uint8_t *str = ctx->store + s->offset;
+    int x = o->x, y = o->y;
+    for (uint32_t i = 0; i < s->length; i++) {
+        uint32_t ch = str[i];
+        if (ch == 0) break;
+        if (ch <= 31u) { x += (int)ch - 11; continue; }
+        if (ch > 127u) return 0;
+        uint32_t off = rd32(font + (ch - 32u) * 4u);
+        if (off == 0 || off + 2u > f->length) return 0;
+        uint32_t w = blit_image(ctx, font + off, f->length - off, x, y);
+        if (!w) return 0;
+        x += (int)w;
+    }
+    return 1;
 }
 
 /* Inline/cached text: one lv_label per active text object, positioned absolutely.
@@ -335,6 +369,7 @@ static void labels_clear(customCfwContext *ctx) {
 }
 
 static void draw_text(customCfwContext *ctx, cfw_object *o) {
+    if (o->type == SH_TEXT_CACHED && draw_cached_font_text(ctx, o)) return;   /* mono grids */
     if (ctx->label_count >= CACHE_LABELS || !ctx->page_root) return;
     const char *s = 0;
     char tmp[CACHE_LABELS ? 129 : 129];
