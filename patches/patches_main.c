@@ -6,7 +6,7 @@
  * each injected entry point is just module_va + its offset in the one blob. The
  * modules share no typedef/macro/function names, so the plain #include chain
  * compiles cleanly. There are no mutable globals (no .data/.bss): all state lives
- * in one heap block reached through the AppListView tail (ctx.c).
+ * in one heap block whose pointer sits in the module's RNLink registry entry (ctx.c).
  */
 #include "cfw.h"
 

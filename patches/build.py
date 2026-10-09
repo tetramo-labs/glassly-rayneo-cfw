@@ -86,21 +86,24 @@ FW_SYMBOLS = [
     ("logger_log", "logger_log", None),
 ]
 
-# ---- hook sites (all byte-verified against the stock image) -----------------
-# The AppListView allocation immediate is bumped 0xdc -> 0xfc so the object gains
-# a 32-byte tail at app+0xdc that holds the CFW state pointer (the prior-firmware
-# page-extension pattern). LinkMonitor::registerLinkCallback is hooked where it
-# fills the launcher's RNLink callback table, so the module can register its own
-# table for business 0xF0 through the same rnlink_if_register_callback.
-ALLOC_SITE = 0x1079FE2C          # movs immediate, stock "dc20" -> "fc20"
+# ---- hook site (byte-verified against the stock image) ----------------------
+# LinkMonitor::registerLinkCallback is hooked where it fills the launcher's
+# RNLink callback table, so the module can register its own table for business
+# 0xF0 through the same rnlink_if_register_callback (the interface vtable slot
+# +8 at 0x182d33f4 is that very function).
 SHIM_SITE = 0x106D9D1A           # 10-byte inline sequence -> bl cfw_register_shim
 SHIM_STOCK = bytes.fromhex("00241f48204b84610360")
 # Pointer constants the shim relies on; verified so a rebase that moves them fails.
 SHIM_ASSERTS = [
-    (0x106D9D9C, 0x19750D2C),    # &g_launcher_file_sink
-    (0x106D9DA0, 0x106D97F1),    # stock file-complete callback (preserved at [0])
-    (0x10799030, 0x19A1F954),    # &g_launcher (app-pointer chain root)
+    (0x106D9D9C, 0x19750D2C),    # &launcher business-15 callback table
+    (0x106D9DA0, 0x106D97F1),    # its stock slot-0 data callback (preserved at [0])
 ]
+# RNLink callback registry (24 entries x 0x2c): the literal loaded by both
+# rnlink_if_register_callback (0x107763dc: ldr r3,[pc,#0x80]) and
+# rnlink_if_on_data_recv (0x10776384: ldr r4,[pc,#0x50]). The module keeps its
+# heap-context pointer in the `sub` word (+0x20) of its own entry (ctx.c).
+RN_REGISTRY = 0x1987C780
+RN_REGISTRY_LITERALS = [0x10776460, 0x107763D8]
 
 
 class BuildError(Exception):
@@ -170,6 +173,8 @@ def write_fw_header(resolved):
     ]
     for r in resolved:
         lines.append(f"#define FWA_{r['alias']} 0x{r['address']:08x}u")
+    lines.append("/* data: RNLink callback registry (24 x 0x2c), literal-verified in build_ap */")
+    lines.append(f"#define FWA_rnlink_registry 0x{RN_REGISTRY:08x}u")
     open(os.path.join(GEN_DIR, "fw_syms.h"), "w").write("\n".join(lines) + "\n")
 
 
@@ -408,15 +413,15 @@ def build_ap(ap, src=None):
     def off(va):
         return va - BASE
 
-    # 1. AppListView allocation immediate 0xdc -> 0xfc (32-byte state tail).
-    if ap[off(ALLOC_SITE):off(ALLOC_SITE) + 2] != bytes.fromhex("dc20"):
-        raise BuildError("AppListView allocation immediate not 'dc20' at the expected site")
-    ops.append({"offset": off(ALLOC_SITE), "old": "dc20", "new": "fc20",
-                "desc": "AppListView allocation 0xdc->0xfc (CFW state tail at app+0xdc)"})
+    # 1. The RNLink registry address the C relies on (FWA_rnlink_registry).
+    for va in RN_REGISTRY_LITERALS:
+        got = struct.unpack_from("<I", ap, off(va))[0]
+        if got != RN_REGISTRY:
+            raise BuildError(f"RNLink registry literal at {va:#x} is {got:#x}, expected {RN_REGISTRY:#x}")
 
-    # 2. Launcher file-receive shim: inline sequence -> bl cfw_register_shim.
+    # 2. Launcher registration shim: inline sequence -> bl cfw_register_shim.
     if ap[off(SHIM_SITE):off(SHIM_SITE) + len(SHIM_STOCK)] != SHIM_STOCK:
-        raise BuildError("file-receive shim stock bytes mismatch")
+        raise BuildError("registration shim stock bytes mismatch")
     for va, want in SHIM_ASSERTS:
         got = struct.unpack_from("<I", ap, off(va))[0]
         if got != want:
@@ -452,9 +457,7 @@ def build_ap(ap, src=None):
     info = {
         "module_va": module_va, "module_at": module_at, "blob_len": len(blob),
         "patched_len": len(patched), "resolved": resolved,
-        "hooks": [{"site": hex(ALLOC_SITE), "len": 2, "old": "dc20", "new": "fc20",
-                   "purpose": "enlarge AppListView by 32 B for the CFW state tail"},
-                  {"site": hex(SHIM_SITE), "len": len(SHIM_STOCK),
+        "hooks": [{"site": hex(SHIM_SITE), "len": len(SHIM_STOCK),
                    "old": SHIM_STOCK.hex(), "new": shim_new.hex(),
                    "purpose": "call cfw_register_shim from LinkMonitor::registerLinkCallback"}],
     }

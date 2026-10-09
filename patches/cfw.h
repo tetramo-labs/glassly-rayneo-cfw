@@ -3,9 +3,9 @@
  * All injected modules compile as one translation unit (patches_main.c), so this
  * header carries every shared type, the firmware-call wrappers, and the forward
  * declarations of the cross-module (static) functions. There are NO mutable
- * globals: every byte of runtime state lives in one heap block reached through
- * the AppListView tail (see ctx.c), so build.py can assert the module has no
- * .data/.bss.
+ * globals: every byte of runtime state lives in one heap block whose pointer
+ * sits in the module's own RNLink registry entry (see ctx.c), so build.py can
+ * assert the module has no .data/.bss.
  */
 #ifndef GLASSLY_CFW_H
 #define GLASSLY_CFW_H
@@ -115,14 +115,16 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 2u
-#define REV_STRING "GLASSLYCFW-IO/2"
+#define REV_MAJOR 3u
+#define REV_STRING "GLASSLYCFW-IO/3"
 #define MAX_CHUNK 240u
 #define STORE_KIB 64u
 /* IDENT flags: bit0 = zlib COMPRESSED records accepted; bit1 = raw stream packets
- * accepted on business 0xF0 (the only downlink since revision 2). */
+ * accepted on business 0xF0 (the only downlink since revision 2); bit2 = the
+ * heap context exists (set per reply, not part of IDENT_FLAGS). */
 #define IDENT_FLAG_ZLIB     0x01u
 #define IDENT_FLAG_RAW_0XF0 0x02u
+#define IDENT_FLAG_CONTEXT  0x04u
 #define IDENT_FLAGS         (IDENT_FLAG_ZLIB | IDENT_FLAG_RAW_0XF0)
 #define RAW_MAX_BYTES 4096u        /* one frame payload: [opt][stream][chunk <= MAX_CHUNK] */
 #define CFW_STORE_BYTES (STORE_KIB * 1024u)
@@ -166,6 +168,9 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define RPL_SETTLED 0x09u
 #define RPL_IDENT   0x11u
 #define RPL_PAGE    0x13u
+#define RPL_DIAG    0x15u          /* diagnostics, logged by the phone */
+#define DIAG_SRC_RX 1u             /* sent from the RNLink RX callback */
+#define DIAG_SRC_UI 2u             /* queued from the LVGL message handler */
 /* REPLY status */
 #define ST_APPLIED  0u
 #define ST_STALE    1u
@@ -249,6 +254,8 @@ typedef struct {
     uint8_t page_open;
     uint8_t ui_module;             /* message_processor module our UI handler owns, 0 = none */
     uint8_t pending_wakeup;
+    int8_t ui_reg_rc;              /* last message_processor_register_c_handler result (DIAG) */
+    int8_t ui_send_rc;             /* last message_processor_send result (DIAG) */
 
     /* page / LVGL (UI thread only) */
     void *page_root;
@@ -290,6 +297,7 @@ typedef struct {
 /* ctx.c */
 customCfwContext *cfw_ctx(void);
 customCfwContext *cfw_ctx_peek(void);
+uint8_t *cfw_rn_entry(void);
 void cfw_zero(void *p, uint32_t n);
 
 /* mem.c (named for clang's implicit calls) */
@@ -317,7 +325,9 @@ void cfw_input_attach(customCfwContext *ctx, void *root);
 void cfw_gesture(customCfwContext *ctx, uint8_t type, uint8_t source);
 
 /* ident.c */
-void cfw_send_ident(customCfwContext *ctx);
+void cfw_ident_direct(const customCfwContext *ctx);
+void cfw_diag_direct(const customCfwContext *ctx);
+void cfw_send_diag(customCfwContext *ctx);
 void cfw_send_page_state(customCfwContext *ctx, uint8_t state, uint8_t reason);
 
 /* link.c */
@@ -339,5 +349,7 @@ typedef struct {
  * 0 data(bus, data, len)  1 conn state  2 multipoint  3 bond  4 device info
  * 5 send done  6 file received  7 data_ex(bus, data, len, flag) */
 typedef struct { void *slot[8]; } cfw_rn_callbacks;
+/* The module's table (link.c); its address identifies our registry entry (ctx.c). */
+extern const cfw_rn_callbacks cfw_rn_cbs;
 
 #endif /* GLASSLY_CFW_H */

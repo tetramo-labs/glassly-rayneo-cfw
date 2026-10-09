@@ -85,3 +85,30 @@ Phone (both platforms):
   frame. `minimumRevision`/`MINIMUM_REVISION` and the catalog revision → 2.
 * Update `RayNeoIOProtocolTests` / `RayNeoIOProtocolTest` packet and control
   expectations; delete the file-link tests (keep `RayNeoIOFileTransfer` ones).
+
+## 2026-10-09 — revision 2 result and revision 3
+
+Revision 2 flashed, booted, OTA-confirmed and reconnected; the handshake
+(which needs a business-15 reply) completed; the QUERY went out 2 s before the
+stock verdict (`flashing` was already cleared on iOS); no IDENT. Further
+disassembly:
+
+* `LinkMonitor::registerLinkCallback` calls `rnlink_get_interface()->register`
+  (vtable `0x182d33f4` + 8), which is `rnlink_if_register_callback` — the
+  module's direct call is equivalent. It is reached from
+  `LinkMonitor::doStartMonitoring`.
+* `handle_complete_packet` has no business filter beyond 0x10/0x11; every
+  other complete message reaches `rnlink_if_on_data_recv` with complete=1.
+* `Launcher::Launcher` stores `this` at `0x19a1f954`;
+  `ViewManager::ensureAppListView` keeps the view at `+0x10` but creates it
+  lazily (`onEnterState`/`eventHandler`), so `cfw_ctx()` had no home until the
+  app list was shown — a silent "no context" on every QUERY at connect time.
+* The registry's `sub` word (+0x20) is read only by the registrar's duplicate
+  check and by `rnlink_if_unregister_callback`; no dispatcher calls it.
+
+Revision 3: the context pointer lives in the module's own registry entry
+(`sub` word), the AppListView allocation hook is gone, IDENT (+ a DIAG) is
+sent synchronously from the RX callback before the LVGL hop, and a second DIAG
+is queued from the LVGL handler. Phone: logs DIAG, minimum revision 3, Android
+re-probes after a flash (its probe at the post-reboot reconnect was blocked by
+the still-active flasher).

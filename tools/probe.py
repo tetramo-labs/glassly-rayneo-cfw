@@ -63,6 +63,15 @@ def tlv(tag, value):
     return bytes([tag]) + struct.pack(">H", len(value)) + value
 
 
+def parse_diag(payload):
+    """DIAG [15][source][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32]"""
+    if len(payload) < 21 or payload[0] != 0x15:
+        return None
+    entry, ctx, ui_module, reg_rc, send_rc, timer, tick = struct.unpack_from("<IIBbbII", payload, 2)
+    return dict(source={1: "rx", 2: "ui"}.get(payload[1], payload[1]), entry=hex(entry), ctx=hex(ctx),
+                ui_module=ui_module, reg_rc=reg_rc, send_rc=send_rc, timer=hex(timer), tick=tick)
+
+
 def parse_ident(payload):
     if not payload or payload[0] != 0x11:
         return None
@@ -71,7 +80,8 @@ def parse_ident(payload):
     flags = payload[12]
     name = payload[13:].split(b"\0", 1)[0].decode("ascii", "replace")
     return dict(ver=ver, w=w, h=h, max_chunk=max_chunk, store_kib=store_kib,
-                revision=revision, zlib=bool(flags & 1), name=name)
+                revision=revision, zlib=bool(flags & 1), raw=bool(flags & 2),
+                context=bool(flags & 4), name=name)
 
 
 async def run(args):
@@ -94,6 +104,10 @@ async def run(args):
         frames = bytes(data)
         if len(frames) >= 10 and frames[0] == 0xAA and frames[1] == 0x55 and frames[7] == BIZ_GLASSLY:
             payload = frames[8:-2]
+            diag = parse_diag(payload)
+            if diag:
+                print("DIAG:", diag)
+                return
             parsed = parse_ident(payload)
             if parsed:
                 ident["value"] = parsed

@@ -7,11 +7,13 @@ application image `nuttx_ap.bin` to add one thing: a Glassly link on BLE busines
 forwards touch/crown gestures back. It is the firmware counterpart of the
 phone-side RayNeo iO support in the Glassly repo.
 
-**Revision: `GLASSLYCFW-IO/2`.**
+**Revision: `GLASSLYCFW-IO/3`.**
 
-> ⚠️ **Barely verified on hardware.** Revision 1 flashed, booted and
-> OTA-confirmed on a RayNeo iO (2026-10-07) but never answered the phone; the
-> causes are fixed in revision 2, which has not been flashed yet. Flashing can brick the device
+> ⚠️ **Barely verified on hardware.** Revisions 1 and 2 flashed, booted and
+> OTA-confirmed on a RayNeo iO (2026-10-07/09) but never answered the phone.
+> Revision 3 answers IDENT straight from the RNLink receive callback, keeps its
+> state pointer in its own RNLink registry entry instead of a launcher view, and
+> adds a DIAG reply so the next flash reports what happened. Flashing can brick the device
 > and there is no verified recovery path. Read [`docs/SAFETY.md`](docs/SAFETY.md)
 > first. The protocol knowledge here comes from prior firmware analysis of the
 > stock image; the object cache and RLE code are derived from the sibling Even
@@ -23,8 +25,8 @@ phone-side RayNeo iO support in the Glassly repo.
   asset formats the G2 Glassly CFW uses) plus a small control channel
   (QUERY/IDENT, PAGE_OPEN/CLOSE, KEEPALIVE), both over business `0xF0` in each
   direction. The module registers its own RNLink receive table for business
-  0xF0 and advertises IDENT `flags = 0x03` (zlib yes, raw 0xF0 yes). Each packet
-  is `[opt][stream][chunk]`; see `docs/PROTOCOL.md`.
+  0xF0 and advertises IDENT `flags = 0x07` (zlib yes, raw 0xF0 yes, context
+  present). Each packet is `[opt][stream][chunk]`; see `docs/PROTOCOL.md`.
 * Object cache (RESET/PUT/SHOW/HIDE) with image/string/font assets, 4bpp RLE,
   and RECT/RECT_FILL/IMAGE/TEXT_CACHED/TEXT_INLINE shape records, rendered into a
   540×180 L8 canvas (1-bit panel: gray ≥ 8 → on) plus positioned `lv_label`s for
@@ -109,10 +111,10 @@ patches/
   patches_main.c        single translation unit; includes the modules below
   cfw.h                 shared types, verified firmware-call wrappers, forward decls
   mem.c rle.c rle.h     freestanding mem*, 4bpp RLE (from the G2 Glassly CFW)
-  ctx.c                 heap singleton via the AppListView tail (app+0xdc)
+  ctx.c                 heap singleton; pointer kept in the module's RNLink registry entry
   scene.c               object cache + shape records + L8 render
-  link.c                business 0xF0: records, zlib, control, uplink; file-sink shim
-  page.c input.c ident.c  page lifecycle/lease, gesture capture, IDENT/PAGE replies
+  link.c                business 0xF0: RX callback, records, zlib, control, uplink; registration shim
+  page.c input.c ident.c  page lifecycle/lease, gesture capture, IDENT/DIAG/PAGE replies
   symbols.json          AP symbol table (name_ptr, address, tableOffset)
   build.py              clang -> single blob, no-linker reloc resolver, AP splice
   gen_patches.py        build.py -> committed cfw_patches.json

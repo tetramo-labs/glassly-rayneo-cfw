@@ -10,11 +10,12 @@
  * to the callback, so the phone repeats it in every packet) and is echoed in
  * ACK/NACK/REPLY. A control packet is [0x10][stream][ctrl].
  *
- * The RX callback runs on the RNLink thread: it validates, deep-copies and
- * enqueues to the LVGL thread through message_processor_send (module 5, or 3 if
- * 5 is taken; ids must be 1..15 and a taken id is refused without side
- * effects). All packet parsing, LVGL mutation and uplink run on the LVGL
- * thread, one reply at a time, >= 100 ms apart, <= 192 bytes. The UPLINK uses
+ * The RX callback runs on the RNLink thread: it answers QUERY with IDENT (and a
+ * DIAG) right there, then validates, deep-copies and enqueues every packet to
+ * the LVGL thread through message_processor_send (module 5, or 3 if 5 is
+ * taken; ids must be 1..15 and a taken id is refused without side effects).
+ * All packet parsing, LVGL mutation and queued uplink run on the LVGL thread,
+ * one reply at a time, >= 100 ms apart, <= 192 bytes. The UPLINK uses
  * rnlink_if_send_payload(0xF0, ...).
  */
 #include "cfw.h"
@@ -202,8 +203,9 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl) {
     uint8_t reason;
     switch (ctrl) {
     case CTRL_QUERY:
+        /* IDENT already went out from the RX callback; the queued DIAG proves the hop. */
         ctx->queried = 1;
-        cfw_send_ident(ctx);
+        cfw_send_diag(ctx);
         break;
     case CTRL_PAGE_OPEN:
         if (cfw_page_open(ctx, &reason)) cfw_send_page_state(ctx, 1, PAGE_OK);
@@ -253,14 +255,24 @@ static void cfw_ui_handler(void *arg, void *user) {
 /* ======================= RNLink thread: business 0xF0 ======================= */
 static int cfw_ui_register(customCfwContext *ctx) {
     if (ctx->ui_module) return 1;
-    if (fw_msg_register(UI_MODULE_FIRST, (void *)cfw_ui_handler, 0) == 0) ctx->ui_module = UI_MODULE_FIRST;
-    else if (fw_msg_register(UI_MODULE_SECOND, (void *)cfw_ui_handler, 0) == 0) ctx->ui_module = UI_MODULE_SECOND;
+    int rc = fw_msg_register(UI_MODULE_FIRST, (void *)cfw_ui_handler, 0);
+    if (rc == 0) ctx->ui_module = UI_MODULE_FIRST;
+    else {
+        rc = fw_msg_register(UI_MODULE_SECOND, (void *)cfw_ui_handler, 0);
+        if (rc == 0) ctx->ui_module = UI_MODULE_SECOND;
+    }
+    ctx->ui_reg_rc = (int8_t)rc;
     return ctx->ui_module != 0;
 }
 
 static void cfw_rx_data(uint32_t bus, const uint8_t *data, uint32_t len) {
     if (bus != BIZ_GLASSLY || !data || len < 2 || len > RAW_MAX_BYTES) return;
     customCfwContext *ctx = cfw_ctx();
+    if ((data[0] & PKT_CONTROL) && len >= 3 && data[2] == CTRL_QUERY) {
+        /* Answer here, independent of the context and the LVGL hop. */
+        cfw_ident_direct(ctx);
+        cfw_diag_direct(ctx);
+    }
     if (!ctx || !cfw_ui_register(ctx)) return;
     uint8_t *copy = (uint8_t *)fw_memalign(4, len);
     if (!copy) return;
@@ -271,13 +283,17 @@ static void cfw_rx_data(uint32_t bus, const uint8_t *data, uint32_t len) {
     msg.data = copy;
     msg.bytes = len;
     msg.mode = 0;
-    if (fw_msg_send(ctx->ui_module, &msg) != 0) fw_free(copy);
+    int rc = fw_msg_send(ctx->ui_module, &msg);
+    ctx->ui_send_rc = (int8_t)rc;
+    if (rc != 0) fw_free(copy);
 }
 
-/* Registered by the boot shim; RNLink copies the 32 bytes. Only slot 0 is used. */
-static const cfw_rn_callbacks cfw_rn_cbs = { { (void *)cfw_rx_data, 0, 0, 0, 0, 0, 0, 0 } };
+/* Registered by the boot shim; RNLink copies the 32 bytes. Only slot 0 is used.
+ * Its address identifies the module's registry entry (ctx.c). */
+const cfw_rn_callbacks cfw_rn_cbs = { { (void *)cfw_rx_data, 0, 0, 0, 0, 0, 0, 0 } };
 
 __attribute__((used)) void cfw_boot_register(void) {
+    if (cfw_rn_entry()) return;   /* registerLinkCallback ran again: keep the one entry */
     fw_rnlink_register(&cfw_rn_cbs, 0, BIZ_GLASSLY);
 }
 

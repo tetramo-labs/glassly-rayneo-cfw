@@ -35,18 +35,26 @@ ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/2"
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/3"
 PAGE  [13][state u8][reason u8]
+DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32]
 ```
 
 * `stream` = the **low byte of the RESET frame's 16-bit AA55 messageNumber**,
   as carried in every packet's second byte (RNLink strips the frame header
   before the business callback runs, so the phone repeats it).
 * `ordinal` = per-stream message counter (reset at RESET).
-* IDENT: `ver=2`, `w=540`, `h=180`, `maxChunk=240`, `storeKiB=64`, `revision=2`,
-  `flags = 0x03`. Flag bits: **bit0** = zlib COMPRESSED records accepted (the
-  stock inflater is used); **bit1** = raw packets accepted on business 0xF0.
-  Revision 2 advertises both.
+* IDENT: `ver=3`, `w=540`, `h=180`, `maxChunk=240`, `storeKiB=64`, `revision=3`,
+  `flags = 0x07` normally. Flag bits: **bit0** = zlib COMPRESSED records
+  accepted (the stock inflater is used); **bit1** = raw packets accepted on
+  business 0xF0; **bit2** = the heap context existed when IDENT was built
+  (diagnostic; the phone only logs it).
+* DIAG is a diagnostics reply the phone logs. `source` 1 = sent directly from
+  the RNLink RX callback (right after IDENT), 2 = queued from the LVGL message
+  handler (proves the thread hop). `entry` is the module's RNLink registry
+  entry, `ctx` the heap context, `uiModule` the message-processor id in use,
+  `regRc`/`sendRc` the last registration/send results, `timer` the LVGL
+  service timer, `tick` `os_get_tick_count()`.
 * REPLY `status`: 0 APPLIED, 1 STALE (epoch mismatch), 2 MISSING (unknown id/ver),
   3 CAPACITY, 4 REFUSED.
 * GESTURE `eventType`: 0 single_tap, 1 swipe_up, 2 swipe_down, 3 double_tap,
@@ -56,8 +64,11 @@ PAGE  [13][state u8][reason u8]
 
 ## Control / session rules the firmware enforces
 
-* **QUERY → IDENT** is answerable without the page open and without
-  `isBussinessIdle` (the phone classifies as stock after 2 s of silence).
+* **QUERY → IDENT** is answered synchronously from the RNLink RX callback,
+  without the page open, without `isBussinessIdle`, and without the LVGL hop
+  (the phone classifies as stock after 2 s of silence). A DIAG follows it; a
+  second DIAG arrives through the normal queued uplink once the packet has
+  crossed to the LVGL thread.
 * Cache messages (RESET/PUT/SHOW/HIDE) are **NACKed while the page is closed**.
 * **PAGE_OPEN** gates on `paired() && isBussinessIdle()`. Failure replies
   `PAGE [0][reason]` (reason 1/2 are retried by the phone at 2/5/10 s); success
@@ -79,4 +90,6 @@ is not involved. Revision 1's named-file downlink no longer exists.
 
 Replies: business 0xF0 via `rnlink_if_send_payload`, ≤ 192 B, one at a time
 ≥ 100 ms apart, drained by the module's 100 ms LVGL timer, which the first
-handled packet creates.
+handled packet creates. IDENT and the first DIAG bypass the queue: they are
+sent from the RX callback itself (the stock RX path sends its own
+acknowledgements from that context through the same protocol layer).

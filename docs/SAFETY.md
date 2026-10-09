@@ -1,12 +1,13 @@
 # SAFETY — read before flashing
 
-**Hardware status (2026-10-07):** revision 1 flashed over the Glassly App's
-OTA flow, booted, reported `OtaValidationConfirmed` and reconnected; the
-launcher kept answering general-status requests. It never answered the phone
-(even callback pointers, an invalid message-processor module id, and an
-undrained reply queue — all fixed in revision 2, see `docs/HOOKS.md`).
-Revision 2 has not been flashed. Flashing is still experimental and can brick
-your glasses. If a phone-side change can do what you need, do that instead.
+**Hardware status (2026-10-09):** revisions 1 and 2 flashed over the Glassly
+App's OTA flow, booted, reported `OtaValidationConfirmed` and reconnected; the
+launcher kept answering general-status requests (business 15, the same RNLink
+registry path the module uses). Neither answered the phone's QUERY. Revision 3
+removes the two remaining unverified links in that chain (the launcher-view
+state pointer and the LVGL hop before IDENT) and adds a DIAG reply; it has not
+been flashed. Flashing is still experimental and can brick your glasses. If a
+phone-side change can do what you need, do that instead.
 
 ## What is and is not verified
 

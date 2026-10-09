@@ -3,7 +3,7 @@
 The Glassly CFW module is appended after the stock `nuttx_ap.bin`, 32-byte
 aligned, absolutely linked at `module_va = 0x10a972c0`, with the 8-byte
 build-info footer (`1d3457be 00001930`) relocated to the new end. The patched AP
-is 9,472,764 bytes (stock 9,466,560; ceiling 9,600,000; partition capacity
+is 9,473,400 bytes (stock 9,466,560; ceiling 9,600,000; partition capacity
 `0x9f0000`). Every firmware address the module calls is resolved by name from the
 AP symbol table and verified byte-for-byte against the stock image at build time
 (`patches/build.py`); the resolved set is written to `patches/generated/fw_syms.h`.
@@ -14,18 +14,44 @@ The machine-readable list is `patches/hooks.json`. Only `nuttx_ap.bin` changes.
 
 | Site (VA) | File off | Len | Stock bytes | New bytes | Purpose |
 |---|---|---|---|---|---|
-| `0x1079fe2c` | `0x60fe2c` | 2 | `dc 20` | `fc 20` | Enlarge the launcher `AppListView` allocation 0xdc→0xfc. The 32-byte tail at `app+0xdc` holds `{magic, ctx*}` — the CFW heap-context pointer. |
 | `0x106d9d1a` | `0x549d1a` | 10 | `00 24 1f 48 20 4b 84 61 03 60` | `bl cfw_register_shim` + 3×`nop` | Inside `LinkMonitor::registerLinkCallback`, just before the launcher registers its business-15 callback table at `0x19750d2c`. The shim calls `cfw_boot_register` (which registers the module's own table for business 0xF0 with `rnlink_if_register_callback`) and then reproduces the displaced `movs r4,#0` and the two stores unchanged, so slot `[+0x18]` stays NULL as in stock. |
 | `0x10a972b8` | `0x9072b8` | 8 | `1d 34 57 be 00 00 19 30` | `00`×8 | Zero the old footer slot (relocated to the new end). |
-| `0x10a972c0` | `0x9072c0` | 6204 | *(append)* | module blob + 4-align + footer | The CFW module + relocated footer. |
+| `0x10a972c0` | `0x9072c0` | 6840 | *(append)* | module blob + 4-align + footer | The CFW module + relocated footer. |
 
-The `0x106d9d1a` shim additionally asserts, and fails the build on any mismatch,
-the pointer constants that pin the mechanism against a rebase:
-`[0x106d9d9c] = 0x19750d2c` (the file-sink struct), `[0x106d9da0] = 0x106d97f1`
-(the stock file-complete callback, preserved), `[0x10799030] = 0x19a1f954`
-(the launcher global used by the app-pointer chain).
+The build additionally asserts, and fails on any mismatch, the constants that
+pin the mechanism against a rebase: `[0x106d9d9c] = 0x19750d2c` (the launcher's
+business-15 callback table), `[0x106d9da0] = 0x106d97f1` (its stock slot-0
+callback, preserved), and the RNLink registry literal
+`[0x10776460] = [0x107763d8] = 0x1987c780` (loaded by
+`rnlink_if_register_callback` and `rnlink_if_on_data_recv`), which is emitted
+to the C as `FWA_rnlink_registry`.
 
-## Verified firmware symbols (36)
+### State pointer — the module's own RNLink registry entry (verified 2026-10-08)
+
+The module has no `.data`/`.bss`, so its one pointer to the heap context needs
+a writable word the stock image owns. Since revision 3 that word is the `sub`
+field (+0x20) of the module's own entry in the RNLink callback registry: the
+registrar copies the 32-byte table into a free 0x2c-byte entry, stores `sub`
+at +0x20, the table pointer at +0x24 and the business byte at +0x28. Every
+dispatcher (`rnlink_if_on_data_recv`, `_on_conn_state`, `_on_bond_state`,
+`_on_multipoint_conn_state`, `_on_device_info`, `_on_send_done`,
+`_on_file_recv`) keys on +0x24 and calls a slot only when it is non-NULL; the
+`sub` word is read only by the registrar's duplicate check and by
+`rnlink_if_unregister_callback` as a match key. `ctx.c` finds the entry whose
++0x24 is `&cfw_rn_cbs` and keeps `ctx*` at its +0x20. Because the stored
+pointer defeats the duplicate check, `cfw_boot_register` skips registration
+when the entry already exists (`LinkMonitor::doStartMonitoring` can call
+`registerLinkCallback` more than once).
+
+Revisions 1–2 kept the pointer in a 32-byte tail added to the launcher's
+`AppListView` (allocation 0xdc→0xfc at `0x1079fe2c`, reached through
+`*(0x19a1f954)` → `+0x3c` → `+0x10`). Disassembly shows `Launcher::Launcher`
+does store `this` at `0x19a1f954` and `ViewManager::ensureAppListView` keeps the
+view at `+0x10`, but the view is created lazily from
+`ViewManager::onEnterState`/`eventHandler`, so no context existed until the
+app list had been shown. That hook is gone.
+
+## Verified firmware symbols (37)
 
 All resolved by name and verified `(name_ptr, address)` at `tableOffset` plus the
 name string at `name_ptr`. Highlights: `memalign`/`free`, `rnlink_if_send_payload`
@@ -71,20 +97,23 @@ acknowledged (observed on hardware on stock and revision 1 alike).
 
 ## Unverified (behind clear comments; not claimed to work on hardware)
 
-Hardware result so far (2026-10-07): the patched AP boots, the OTA is
+Hardware result so far (2026-10-09): the patched AP boots, the OTA is
 confirmed, and the launcher answers general status. Revision 1 never answered
 IDENT: its callback pointers were even (fixed in `build.py`), it used an
 invalid message-processor module id, and its uplink was only drained once a
-page existed. Revision 2 has not been flashed yet.
+page existed. Revision 2 (all of that fixed) also stayed silent; its remaining
+unverified dependency was the AppListView state pointer, which disassembly
+later showed is created lazily. Revision 3 has not been flashed yet; its DIAG
+reply reports the registry entry, context, module id and return codes.
 
-1. **App-pointer chain** (`ctx.c`): `*(0x19a1f954)` → `+0x3c` manager → `+0x10`
-   `AppListView`, state tail at `+0xdc`. The `0x19a1f954` pointer *constant* is
-   byte-verified; the `+0x3c`/`+0x10`/`+0xdc` offsets are from prior analysis and
-   are only dereferenced after null checks (a wrong offset yields "no context").
+1. **Whether the shim runs at all.** `registerLinkCallback` is reached (the
+   launcher's business-15 table answers on hardware), but no on-device trace of
+   the module's code has been observed yet. The next flash either logs
+   `Glassly CFW detected` plus a DIAG, or shows the hook is not executing.
 2. **Lazy handler registration** races the LVGL thread's handler lookup (an
    unordered_map insert from the RNLink thread). It happens once per boot, on the
-   first business-0xF0 frame; a boot-time registration needs the AppListView,
-   which does not exist yet when the shim runs.
+   first business-0xF0 frame; `message_processor_init` ordering relative to the
+   shim is unknown, so registration is not attempted at boot.
 3. **Crown/rotary input** (`input.c`): whether a full-screen page receives the
    crown as an LVGL rotary event (`LV_EVENT_ROTARY`, ~600 raw units/detent). The
    key click/long-press path uses the documented `LV_EVENT_KEY` codes 0x3a/0x3b.
