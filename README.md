@@ -30,9 +30,13 @@ phone-side RayNeo iO support in the Glassly repo.
   0xF0 and advertises IDENT `flags = 0x07` (zlib yes, raw 0xF0 yes, context
   present). Each packet is `[opt][stream][chunk]`; see `docs/PROTOCOL.md`.
 * Object cache (RESET/PUT/SHOW/HIDE) with image/string/font assets, 4bpp RLE,
-  and RECT/RECT_FILL/IMAGE/TEXT_CACHED/TEXT_INLINE shape records, rendered into a
-  540×180 L8 canvas (1-bit panel: gray ≥ 8 → on) plus positioned `lv_label`s for
-  text.
+  the 13 geometry records (lines, rounded rects, circles, triangles, quads,
+  beziers, arcs, pies: the G2 rasterizer, `geom.c`) and IMAGE/TEXT_CACHED/
+  TEXT_INLINE, rendered into a 540×180 L8 canvas (1-bit panel: gray ≥ 8 → on)
+  plus positioned `lv_label`s for text. No SVG paths, tweens or glides.
+* ANCS relay: the iOS notifications the stock firmware reads over ANCS are
+  forwarded to the phone as JSON (`ancs.c`, one retargeted call), so the
+  Glassly App can show them its own way; the stock on-glass popup is untouched.
 * A phone-initiated page with a 120 s lease and a 100 ms service timer, gated on
   `paired() && isBussinessIdle()`.
 * Gesture forwarding: click → single_tap, two clicks < 300 ms → double_tap, long
@@ -120,9 +124,10 @@ patches/
   cfw.h                 shared types, verified firmware-call wrappers, forward decls
   mem.c rle.c rle.h     freestanding mem*, 4bpp RLE (from the G2 Glassly CFW)
   ctx.c                 heap singleton; pointer kept in the module's RNLink registry entry
-  scene.c               object cache + shape records + L8 render
+  geom.c scene.c        geometry rasterizer (G2 port); object cache + shape records + L8 render
   link.c                business 0xF0: RX callback, records, zlib, control, uplink; registration shim
   page.c input.c ident.c  page lifecycle/lease, gesture capture, IDENT/DIAG/PAGE replies
+  ancs.c                ANCS relay hook (notification JSON -> 0xF0 ANCS records)
   symbols.json          AP symbol table (name_ptr, address, tableOffset)
   build.py              clang -> single blob, no-linker reloc resolver, AP splice
   gen_patches.py        build.py -> committed cfw_patches.json

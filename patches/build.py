@@ -81,6 +81,8 @@ FW_SYMBOLS = [
     ("inflate", "inflate", 0x10835B6D),
     ("inflateEnd", "inflateEnd", 0x10836B4D),
     ("launcher_is_business_idle", "rayneo::service::launcher::LauncherAPI::isBussinessIdle", None),
+    ("ancs_notification_handler",
+     "rayneo::service::notification::NotificationMessageHandler::handleAncsNotificationReceived", 0x107029D1),
     ("rnlink_paired_status", "real_get_rnlink_paired_status", None),
     ("display_report_activity", "lv_rayneo_display_report_activity", None),
     ("logger_log", "logger_log", None),
@@ -94,6 +96,10 @@ FW_SYMBOLS = [
 SHIM_SITE = 0x106D9D1A           # 10-byte inline sequence -> bl cfw_register_shim
 SHIM_STOCK = bytes.fromhex("00241f48204b84610360")
 # Pointer constants the shim relies on; verified so a rebase that moves them fails.
+# ANCS relay: the one `bl handleAncsNotificationReceived` inside
+# NotificationMessageHandler::handleMessage -> bl cfw_ancs_hook (ancs.c).
+ANCS_SITE = 0x10702E7E
+ANCS_STOCK_TARGET = 0x107029D1
 SHIM_ASSERTS = [
     (0x106D9D9C, 0x19750D2C),    # &launcher business-15 callback table
     (0x106D9DA0, 0x106D97F1),    # its stock slot-0 data callback (preserved at [0])
@@ -436,6 +442,14 @@ def build_ap(ap, src=None):
     ops.append({"offset": off(SHIM_SITE), "old": SHIM_STOCK.hex(), "new": shim_new.hex(),
                 "desc": "LinkMonitor::registerLinkCallback -> cfw_register_shim (registers the 0xF0 receiver)"})
 
+    # 2b. ANCS relay: retarget the stock bl to cfw_ancs_hook.
+    ancs_stock = _branch_bytes(ANCS_SITE, ANCS_STOCK_TARGET, link=True)
+    if ap[off(ANCS_SITE):off(ANCS_SITE) + 4] != ancs_stock:
+        raise BuildError("ANCS hook site is not `bl handleAncsNotificationReceived`")
+    ancs_new = _branch_bytes(ANCS_SITE, (module_va + funcs["cfw_ancs_hook"]) | 1, link=True)
+    ops.append({"offset": off(ANCS_SITE), "old": ancs_stock.hex(), "new": ancs_new.hex(),
+                "desc": "NotificationMessageHandler::handleMessage: bl handleAncsNotificationReceived -> cfw_ancs_hook (ANCS relay)"})
+
     # 3. Relocate the build-info footer and append the module 32-byte aligned.
     pad = module_at - footer_at           # old footer bytes become zero padding
     ops.append({"offset": footer_at, "old": FOOTER.hex(), "new": ("00" * pad),
@@ -459,7 +473,9 @@ def build_ap(ap, src=None):
         "patched_len": len(patched), "resolved": resolved,
         "hooks": [{"site": hex(SHIM_SITE), "len": len(SHIM_STOCK),
                    "old": SHIM_STOCK.hex(), "new": shim_new.hex(),
-                   "purpose": "call cfw_register_shim from LinkMonitor::registerLinkCallback"}],
+                   "purpose": "call cfw_register_shim from LinkMonitor::registerLinkCallback"},
+                  {"site": hex(ANCS_SITE), "len": 4, "old": ancs_stock.hex(), "new": ancs_new.hex(),
+                   "purpose": "call cfw_ancs_hook instead of handleAncsNotificationReceived (tail-calls it)"}],
     }
     return patched, ops, info
 

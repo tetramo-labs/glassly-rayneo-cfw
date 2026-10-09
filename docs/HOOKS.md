@@ -15,8 +15,9 @@ The machine-readable list is `patches/hooks.json`. Only `nuttx_ap.bin` changes.
 | Site (VA) | File off | Len | Stock bytes | New bytes | Purpose |
 |---|---|---|---|---|---|
 | `0x106d9d1a` | `0x549d1a` | 10 | `00 24 1f 48 20 4b 84 61 03 60` | `bl cfw_register_shim` + 3×`nop` | Inside `LinkMonitor::registerLinkCallback`, just before the launcher registers its business-15 callback table at `0x19750d2c`. The shim calls `cfw_boot_register` (which registers the module's own table for business 0xF0 with `rnlink_if_register_callback`) and then reproduces the displaced `movs r4,#0` and the two stores unchanged, so slot `[+0x18]` stays NULL as in stock. |
+| `0x10702e7e` | `0x572e7e` | 4 | `ff f7 a7 fd` (`bl handleAncsNotificationReceived`) | `bl cfw_ancs_hook` | Inside `NotificationMessageHandler::handleMessage`: the hook queues the ANCS notification JSON the stock `ANCSAdapter` built (`msg->data`/`bytes`) as business-0xF0 ANCS records, then tail-calls the stock handler (`ancs.c`). |
 | `0x10a972b8` | `0x9072b8` | 8 | `1d 34 57 be 00 00 19 30` | `00`×8 | Zero the old footer slot (relocated to the new end). |
-| `0x10a972c0` | `0x9072c0` | 6840 | *(append)* | module blob + 4-align + footer | The CFW module + relocated footer. |
+| `0x10a972c0` | `0x9072c0` | 10618 | *(append)* | module blob + 4-align + footer | The CFW module + relocated footer. |
 
 The build additionally asserts, and fails on any mismatch, the constants that
 pin the mechanism against a rebase: `[0x106d9d9c] = 0x19750d2c` (the launcher's
@@ -54,7 +55,7 @@ view at `+0x10`, but the view is created lazily from
 `ViewManager::onEnterState`/`eventHandler`, so no context existed until the
 app list had been shown. That hook is gone.
 
-## Verified firmware symbols (37)
+## Verified firmware symbols (38)
 
 All resolved by name and verified `(name_ptr, address)` at `tableOffset` plus the
 name string at `name_ptr`. Highlights: `memalign`/`free`, `rnlink_if_send_payload`
@@ -62,7 +63,9 @@ name string at `name_ptr`. Highlights: `memalign`/`free`, `rnlink_if_send_payloa
 `message_processor_register_c_handler` (`0x107d4f61`), the LVGL v9 object/canvas/
 label/event/timer API, `lv_display_get_default`/`lv_display_get_screen_active`,
 `lv_rayneo_display_report_activity`, `LauncherAPI::isBussinessIdle` (`0x106d334d`),
-`real_get_rnlink_paired_status` (`0x1077fa41`), and the zlib inflater
+`real_get_rnlink_paired_status` (`0x1077fa41`),
+`NotificationMessageHandler::handleAncsNotificationReceived` (`0x107029d1`, the
+ANCS relay's tail-call target), and the zlib inflater
 (`inflateInit2_ 0x10835ad1`, `inflate 0x10835b6d`, `inflateEnd 0x10836b4d`).
 
 ### zlib decision — PRESENT, used

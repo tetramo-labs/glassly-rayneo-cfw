@@ -22,8 +22,12 @@ AA55 frame  (phone BLE transport)  -> payload after the business byte
         39 HIDE     [39][epoch][request][flags][bg]
 ```
 
-Shape records (coords signed px on 540×180, clipped): `RECT(2)`/`RECT_FILL(3)`
-20 B, `IMAGE(14)` 12 B, `TEXT_CACHED(16)` 16 B, `TEXT_INLINE(17)` 13+len. Image
+Shape records (coords signed px on 540×180, clipped): the 13 geometry types
+`LINE(1) RECT(2) RECT_FILL(3) CIRCLE(4) CIRCLE_FILL(5) TRI(6) TRI_FILL(7)
+QUAD(8) QUAD_FILL(9) BEZIER2(10) BEZIER3(11) ARC(12) PIE(13)` are 20 B
+(`[type][flags][gray][width]` + eight i16 params, the G2 shapes.h layouts,
+rasterized by `geom.c`); `IMAGE(14)` 12 B, `TEXT_CACHED(16)` 16 B,
+`TEXT_INLINE(17)` 13+len. `PATH(18)` (SVG) is not supported. Image
 asset = `[w u8][h u8][4bpp RLE]`; RLE tokens `[cnt<<4|c]`, `[c][cnt u8]`,
 `[c][00][cnt u16]`. `ops` are always empty on RayNeo; no warm-up SHOW/TWEEN is
 sent — the first cache message after RESET is a real PUT or SHOW.
@@ -38,6 +42,7 @@ GESTURE [07][eventType u8][source u8][tick u32 LE]
 IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/3"
 PAGE  [13][state u8][reason u8]
 DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32]
+ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification relay, ancs.c)
 ```
 
 * `stream` = the **low byte of the RESET frame's 16-bit AA55 messageNumber**,
@@ -55,6 +60,15 @@ DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][time
   entry, `ctx` the heap context, `uiModule` the message-processor id in use,
   `regRc`/`sendRc` the last registration/send results, `timer` the LVGL
   service timer, `tick` `os_get_tick_count()`.
+* ANCS: the JSON the stock firmware's ANCS client builds for one iOS
+  notification (`notificationUID`, `appId`, `appName`, `title`, `subtitle`,
+  `content`, `location`, `carrier`, `timestamp` `yyyyMMdd'T'HHmmss`, `eventId`
+  0 added / 1 modified / 2 removed, `eventFlags` bit2 = pre-existing, bit1 =
+  important, `categoryID`, `categoryCount`), split into <= 185-byte chunks with
+  one `seq`; reassemble by (seq, offset) until offset + chunk == total. Sent
+  only after a QUERY on this connection; a notification that does not fit the
+  free uplink slots is dropped whole. Testable only from an iPhone (macOS has
+  no ANCS server).
 * REPLY `status`: 0 APPLIED, 1 STALE (epoch mismatch), 2 MISSING (unknown id/ver),
   3 CAPACITY, 4 REFUSED.
 * GESTURE `eventType`: 0 single_tap, 1 swipe_up, 2 swipe_down, 3 double_tap,

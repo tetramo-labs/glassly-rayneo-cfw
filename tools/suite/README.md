@@ -21,7 +21,7 @@ Then run the suite:
 
 ```bash
 cd tools/suite
-swift run rayneo-io-suite                 # every case, in order (~1 min + the 15 s hold)
+swift run rayneo-io-suite                 # every case, in order (~1.5 min + the 15 s hold)
 swift run rayneo-io-suite cfw page        # by group
 swift run rayneo-io-suite ident stale     # by id (connect is implied)
 swift run rayneo-io-suite --list
@@ -46,6 +46,8 @@ Groups and cases, in run order:
 | scene | reset | RESET → REPLY applied + ACK |
 | scene | show-rect | inline filled rectangle applied (visible 2 s) |
 | scene | show-text | inline text next to it applied (visible 2 s) |
+| scene | geometry-fill | filled circle, triangle, quad, pie, rounded rect applied (visible 2 s) |
+| scene | geometry-stroke | hairline + wide line, ring, outlines, two beziers, arc, rounded border applied (visible 2 s) |
 | scene | compressed | zlib-compressed SHOW inflated and applied |
 | scene | missing | SHOW of an unknown object → MISSING |
 | scene | stale | wrong epoch → STALE |
@@ -54,6 +56,11 @@ Groups and cases, in run order:
 | page | close | PAGE_CLOSE → closed, reason 0 |
 | page | reopen | opens and closes again |
 | cfw | settle | link still up afterwards |
+
+Not covered: the ANCS relay (`patches/ancs.c`). macOS serves no ANCS, so it
+can only be exercised from an iPhone running the Glassly App (watch for
+`RAYNEO: CFW ANCS` / `phone_notification` in its log). The suite's watcher
+does print any ANCS record that arrives.
 
 Exit status is 0 only when every selected case passed. Hardware findings the
 suite now guards against are recorded in `docs/HOOKS.md` (registry lookup,

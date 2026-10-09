@@ -199,6 +199,40 @@ final class Suite {
             try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
             return "applied"
         },
+        Case(id: "geometry-fill", group: "scene", title: "filled circle, triangle, quad, pie and rounded rect (visible)") { s in
+            s.watcher.clear()
+            let puts = [
+                s.putObject(id: 10, version: 1, record: s.geomRecord(5, width: 0, [60, 90, 40])), // CIRCLE_FILL
+                s.putObject(id: 11, version: 1, record: s.geomRecord(7, width: 0, [120, 150, 200, 150, 160, 40])), // TRI_FILL
+                s.putObject(id: 12, version: 1, record: s.geomRecord(9, width: 0, [220, 60, 300, 40, 310, 140, 230, 150])), // QUAD_FILL
+                s.putObject(id: 13, version: 1, record: s.geomRecord(13, width: 0, [380, 90, 45, -90, 150])), // PIE
+                s.putObject(id: 14, version: 1, record: s.geomRecord(3, width: 0, [440, 30, 90, 120, 16])), // RECT_FILL r16
+            ]
+            try s.sendMessage(s.showMessage(puts: puts, refs: [(10, 1), (11, 1), (12, 1), (13, 1), (14, 1)]), compress: false)
+            let reply = try await s.cacheReply(timeout: 3)
+            guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(reply.summary) }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
+            return "applied"
+        },
+        Case(id: "geometry-stroke", group: "scene", title: "lines, ring, outlines, beziers, arc and a rounded border (visible)") { s in
+            s.watcher.clear()
+            let puts = [
+                s.putObject(id: 20, version: 1, record: s.geomRecord(1, width: 1, [10, 10, 530, 170])), // LINE hairline
+                s.putObject(id: 21, version: 1, record: s.geomRecord(1, width: 5, [10, 170, 530, 10])), // LINE wide
+                s.putObject(id: 22, version: 1, record: s.geomRecord(4, width: 3, [60, 90, 40])), // CIRCLE ring
+                s.putObject(id: 23, version: 1, record: s.geomRecord(6, width: 1, [120, 150, 200, 150, 160, 40])), // TRI
+                s.putObject(id: 24, version: 1, record: s.geomRecord(8, width: 2, [220, 60, 300, 40, 310, 140, 230, 150])), // QUAD
+                s.putObject(id: 25, version: 1, record: s.geomRecord(10, width: 2, [330, 160, 380, 20, 430, 160])), // BEZIER2
+                s.putObject(id: 26, version: 1, record: s.geomRecord(11, width: 1, [330, 90, 360, 10, 400, 170, 430, 90])), // BEZIER3
+                s.putObject(id: 27, version: 1, record: s.geomRecord(12, width: 2, [380, 90, 45, 180, 360])), // ARC
+                s.putObject(id: 28, version: 1, record: s.geomRecord(2, width: 2, [440, 30, 90, 120, 12])), // RECT r12 border
+            ]
+            try s.sendMessage(s.showMessage(puts: puts, refs: (20 ... 28).map { (UInt32($0), 1) }), compress: false)
+            let reply = try await s.cacheReply(timeout: 3)
+            guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(reply.summary) }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
+            return "applied"
+        },
         Case(id: "compressed", group: "scene", title: "a zlib-compressed SHOW is inflated and applied") { s in
             s.watcher.clear()
             let record = s.rectRecord(filled: false, x: 10, y: 10, w: 520, h: 160, gray: 15)
@@ -381,7 +415,7 @@ final class Suite {
         var m = header(38, epoch: epoch)
         m.append(contentsOf: [0x00, 0x00, UInt8(puts.count)])
         for p in puts {
-            m.append(p)   // back to back, no length prefix (G2CfwScene.showPayload)
+            m.append(p) // back to back, no length prefix (G2CfwScene.showPayload)
         }
         m.append(contentsOf: [UInt8(refs.count & 0xFF), UInt8(refs.count >> 8)])
         for (id, ver) in refs {
@@ -406,6 +440,15 @@ final class Suite {
             r.append(le16(v))
         }
         r.append(contentsOf: [UInt8](repeating: 0, count: 6))
+        return r
+    }
+
+    /// Geometry record (types 1..13): `[type][1][gray][width]` + eight i16 params (G2CfwScene.Slot pads to 8).
+    private func geomRecord(_ type: UInt8, width: UInt8, _ params: [Int16]) -> Data {
+        var r = Data([type, 1, 0x0F, width])
+        for i in 0 ..< 8 {
+            r.append(le16(i < params.count ? params[i] : 0))
+        }
         return r
     }
 

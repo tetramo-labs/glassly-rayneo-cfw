@@ -136,3 +136,17 @@ app; `tools/suite` here is the acceptance run. Six flashes in one afternoon:
 Also: macOS CoreBluetooth can leave `canSendWriteWithoutResponse` false for
 good; the harness forces queued writes after 2 s (the glasses re-request a
 slice after 20 s, four misses abort the OTA with errcode 8).
+
+Same afternoon, two ports from the G2 CFW once the link was stable:
+
+* `geom.c`: the G2 geometry rasterizer (shapes.c) retargeted to the L8 canvas,
+  so all 13 record types the phone's `G2CfwScene` emits (lines, rounded rects,
+  circles, triangles, quads, beziers, arcs, pies) render; before, only
+  RECT/RECT_FILL did and the example miniapp's shapes suite would have been
+  refused for half its cases. Suite cases `geometry-fill` / `geometry-stroke`.
+* `ancs.c`: the ANCS relay. The stock firmware already runs a full ANCS client
+  and serialises each notification as JSON for its own notification service;
+  one retargeted `bl` (`0x10702e7e`) queues that JSON as business-0xF0 ANCS
+  records (kind 0x17, chunked) before the stock handler runs. The phone
+  reassembles and feeds `phone_notification` like the G2 relay. Not testable
+  from the Mac (no ANCS server); iPhone only.

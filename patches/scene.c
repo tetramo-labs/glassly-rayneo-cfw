@@ -1,8 +1,8 @@
 /* Retained object cache (modes RESET/PUT/SHOW/HIDE) and the 540x180 L8 render.
  *
- * Ported from the G2 Glassly CFW object cache, reduced to the RayNeo v1 subset:
- * images, strings, cached fonts, RECT/RECT_FILL and inline/cached text, no
- * animation, tween, vectors or SVG. The phone sends (id, version) references;
+ * Ported from the G2 Glassly CFW object cache, reduced to the RayNeo subset:
+ * images, strings, cached fonts, the 13 geometry records (geom.c) and
+ * inline/cached text; no animation, tween or SVG paths. The phone sends (id, version) references;
  * objects persist across SHOW/HIDE until a RESET or eviction. The single-bit
  * panel thresholds 4bpp gray >= 8 to on, written as L8 255. Inline/cached text
  * is drawn with positioned lv_labels (the firmware's default LVGL font); the
@@ -64,11 +64,13 @@ static int shape_into(customCfwContext *ctx, cfw_object *o, const uint8_t *rec, 
     o->text_off = 0;
     o->text_len = 0;
     o->asset_id = o->font_id = 0;
-    if (type == SH_RECT || type == SH_RECT_FILL) {
+    o->width = rec[3];
+    for (unsigned i = 0; i < 8; i++) o->p[i] = 0;
+    if (type >= SH_LINE && type <= SH_PIE) {
         if (len < 20) return 0;
         o->color = rec[2];
-        o->x = rds16(rec + 4); o->y = rds16(rec + 6);
-        o->w = rds16(rec + 8); o->h = rds16(rec + 10); o->r = rds16(rec + 12);
+        for (unsigned i = 0; i < 8; i++) o->p[i] = rds16(rec + 4 + 2 * i);
+        o->x = o->p[0]; o->y = o->p[1]; o->w = o->p[2]; o->h = o->p[3]; o->r = o->p[4];
     } else if (type == SH_IMAGE) {
         if (len < 12) return 0;
         o->x = rds16(rec + 4); o->y = rds16(rec + 6);
@@ -232,14 +234,6 @@ static void px_on(customCfwContext *ctx, int x, int y) {
     if (x < 0 || y < 0 || x >= CFW_W || y >= CFW_H || !ctx->canvas_buf) return;
     ctx->canvas_buf[(uint32_t)y * CFW_W + (uint32_t)x] = CFW_PANEL_ON;
 }
-static void fill_rect(customCfwContext *ctx, int x, int y, int w, int h) {
-    for (int j = 0; j < h; j++)
-        for (int i = 0; i < w; i++) px_on(ctx, x + i, y + j);
-}
-static void stroke_rect(customCfwContext *ctx, int x, int y, int w, int h) {
-    for (int i = 0; i < w; i++) { px_on(ctx, x + i, y); px_on(ctx, x + i, y + h - 1); }
-    for (int j = 0; j < h; j++) { px_on(ctx, x, y + j); px_on(ctx, x + w - 1, y + j); }
-}
 
 static void draw_image(customCfwContext *ctx, cfw_object *o) {
     cfw_asset *a = asset_find(ctx, o->asset_id);
@@ -311,11 +305,10 @@ void cfw_scene_render(customCfwContext *ctx) {
         cfw_object *o = &ctx->objects[ctx->active_list[k]];
         uint8_t gray = (uint8_t)(o->color & 0x0f);
         switch (o->type) {
-        case SH_RECT_FILL:
-            if (gray >= CFW_GRAY_ON) fill_rect(ctx, o->x, o->y, o->w, o->h);
-            break;
-        case SH_RECT:
-            if (gray >= CFW_GRAY_ON) stroke_rect(ctx, o->x, o->y, o->w, o->h);
+        case SH_LINE: case SH_RECT: case SH_RECT_FILL: case SH_CIRCLE: case SH_CIRCLE_FILL:
+        case SH_TRI: case SH_TRI_FILL: case SH_QUAD: case SH_QUAD_FILL:
+        case SH_BEZIER2: case SH_BEZIER3: case SH_ARC: case SH_PIE:
+            if (gray >= CFW_GRAY_ON) cfw_geom_draw(ctx, o->type, o->width, o->p);
             break;
         case SH_IMAGE:
             draw_image(ctx, o);

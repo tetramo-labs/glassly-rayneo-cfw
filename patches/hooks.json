@@ -5,7 +5,7 @@
  "size_ceiling_bytes": 9600000,
  "build_info_footer": "1d3457be00001930",
  "module_va": "0x10a972c0",
- "module_bytes": 6830,
+ "module_bytes": 10608,
  "hooks": [
   {
    "name": "link_register_shim",
@@ -17,6 +17,17 @@
    "verified": true,
    "verification": "stock 10 bytes asserted; pointer constants asserted: [0x106d9d9c]=0x19750d2c (launcher business-15 table), [0x106d9da0]=0x106d97f1 (its stock slot-0 callback); RNLink registry literal asserted: [0x10776460]=[0x107763d8]=0x1987c780",
    "purpose": "Inside LinkMonitor::registerLinkCallback: call cfw_register_shim, which registers the module's RNLink callback table for business 0xF0 (rnlink_if_register_callback, the interface vtable's +8 slot) once, then replays the displaced stock instructions unchanged (slot [0x19750d2c+0x18] stays NULL)."
+  },
+  {
+   "name": "ancs_relay_hook",
+   "site_va": "0x10702e7e",
+   "file_offset": "0x572e7e",
+   "length": 4,
+   "displaced": "fff7a7fd",
+   "new": "96f3d3f8",
+   "verified": true,
+   "verification": "stock 4 bytes asserted to be `bl handleAncsNotificationReceived` (0x107029d1), the symbol table address asserted",
+   "purpose": "Inside NotificationMessageHandler::handleMessage: call cfw_ancs_hook(this, msg) instead of handleAncsNotificationReceived; the hook queues the notification JSON (msg->data/bytes) as business-0xF0 ANCS records and tail-calls the stock handler, so the on-glass popup and whitelist are unchanged."
   },
   {
    "name": "footer_zero",
@@ -33,9 +44,9 @@
    "name": "module_append",
    "site_va": "0x10a972c0",
    "file_offset": "0x9072c0",
-   "length": 6840,
+   "length": 10618,
    "displaced": "",
-   "new": "<6830-byte module blob + 4-align + relocated footer 1d3457be00001930>",
+   "new": "<10608-byte module blob + 4-align + relocated footer 1d3457be00001930>",
    "verified": true,
    "verification": "appended at offset == stock length; module absolutely linked at module_va; patched AP <= 9600000 bytes",
    "purpose": "Append the Glassly CFW module and relocate the build-info footer to the new end."

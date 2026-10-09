@@ -155,8 +155,19 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define ASSET_FONT   1u
 #define ASSET_STRING 2u
 /* shape record types */
+#define SH_LINE        1u
 #define SH_RECT        2u
 #define SH_RECT_FILL   3u
+#define SH_CIRCLE      4u
+#define SH_CIRCLE_FILL 5u
+#define SH_TRI         6u
+#define SH_TRI_FILL    7u
+#define SH_QUAD        8u
+#define SH_QUAD_FILL   9u
+#define SH_BEZIER2    10u
+#define SH_BEZIER3    11u
+#define SH_ARC        12u
+#define SH_PIE        13u
 #define SH_IMAGE      14u
 #define SH_TEXT_CACHED 16u
 #define SH_TEXT_INLINE 17u
@@ -169,6 +180,7 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define RPL_IDENT   0x11u
 #define RPL_PAGE    0x13u
 #define RPL_DIAG    0x15u          /* diagnostics, logged by the phone */
+#define RPL_ANCS    0x17u          /* ANCS relay: [seq][total u16][offset u16][json chunk] (ancs.c) */
 #define DIAG_SRC_RX 1u             /* sent from the RNLink RX callback */
 #define DIAG_SRC_UI 2u             /* queued from the LVGL message handler */
 /* REPLY status */
@@ -217,8 +229,10 @@ typedef struct {
     uint32_t id, version, asset_id, font_id;
     uint32_t text_off;             /* store offset of resolved/inline string, 0 = none */
     uint16_t text_len;
-    int16_t x, y, w, h, r;
+    int16_t x, y, w, h, r;         /* image/text placement (= p[0..4]) */
+    int16_t p[8];                  /* geometry: the record's eight params */
     uint8_t type, options, color, active;
+    uint8_t width;                 /* geometry stroke width (record byte 3) */
 } cfw_object;
 
 /* decoded message / record-assembly sizes */
@@ -256,6 +270,8 @@ typedef struct {
     uint8_t pending_wakeup;
     int8_t ui_reg_rc;              /* last message_processor_register_c_handler result (DIAG) */
     int8_t ui_send_rc;             /* last message_processor_send result (DIAG) */
+    uint8_t ancs_seq;              /* last relayed notification's chunk sequence (ancs.c) */
+    uint8_t ancs_drops;            /* notifications dropped for lack of uplink slots */
 
     /* page / LVGL (UI thread only) */
     void *page_root;
@@ -330,6 +346,9 @@ void cfw_diag_direct(const customCfwContext *ctx);
 void cfw_send_diag(customCfwContext *ctx);
 void cfw_send_page_state(customCfwContext *ctx, uint8_t state, uint8_t reason);
 
+/* geom.c */
+void cfw_geom_draw(customCfwContext *ctx, uint8_t type, uint8_t width, const int16_t *params);
+
 /* link.c */
 int cfw_uplink_push(customCfwContext *ctx, const uint8_t *data, uint8_t len);
 void cfw_uplink_flush(customCfwContext *ctx);
@@ -345,6 +364,9 @@ typedef struct {
     void *context;
     uint8_t mode, padding[3];      /* 0 or 1; the queue refuses anything else */
 } TIONativeMessage;
+
+/* ancs.c: retargeted from NotificationMessageHandler::handleMessage (build.py) */
+void cfw_ancs_hook(void *self, const TIONativeMessage *m);
 
 /* RNLink per-business callback table (8 slots, copied by the registrar):
  * 0 data(bus, data, len)  1 conn state  2 multipoint  3 bond  4 device info

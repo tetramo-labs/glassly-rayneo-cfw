@@ -47,7 +47,9 @@ Verified on this machine:
 
 ## Scope
 
-v1 adds one thing: the Glassly page (a 540×180 overlay driven by the phone over
-business 0xF0) plus gesture forwarding. No animation,
-vectors, keyboard, ANCS, head gestures, or carousel item. It does not touch the
-stock businesses, the OTA flow, audio, or the radio.
+The module adds the Glassly page (a 540×180 overlay driven by the phone over
+business 0xF0) with gesture forwarding, and the ANCS relay (one retargeted
+call inside the notification service; the stock popup and whitelist run as
+before). No animation, SVG paths, keyboard, head gestures, or carousel item.
+It does not touch the other stock businesses, the OTA flow, audio, or the
+radio.
