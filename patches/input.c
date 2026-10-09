@@ -16,6 +16,8 @@
 
 void cfw_gesture(customCfwContext *ctx, uint8_t type, uint8_t source) {
     if (!ctx->page_open && !ctx->queried) return;
+    /* gestures never take the last two uplink slots: replies come first */
+    if ((uint8_t)((ctx->uplink_head + UPLINK_QUEUE - ctx->uplink_tail - 1u) % UPLINK_QUEUE) < 3u) return;
     uint8_t b[7];
     b[0] = RPL_GESTURE;
     b[1] = type;
@@ -63,21 +65,33 @@ void cfw_input_attach(customCfwContext *ctx, void *root) {
     fw_add_event_cb(root, (void *)cfw_event_cb, 0 /* LV_EVENT_ALL */, ctx);
 }
 
-/* Raw wheel listener (InputEventMonitor): delta in raw units, detents of
- * CROWN_PER_DETENT, one swipe gesture per detent. */
-static void cfw_wheel_cb(void *user, int32_t delta) {
+/* Raw wheel listener (InputEventMonitor). The listener is called as
+ * fn(delta, user): AppListView's lambda swaps the two before calling
+ * handleRawWheelInput(this, delta) (verified 2026-10-09; the first build had
+ * them reversed and turned the context pointer into ~700k detents). Delta is
+ * in raw units, CROWN_PER_DETENT per detent, one swipe gesture per detent,
+ * at most WHEEL_MAX_PER_CALL per callback so a burst cannot starve replies. */
+#define WHEEL_MAX_DELTA     (CROWN_PER_DETENT * 50)
+#define WHEEL_MAX_PER_CALL  4
+static void cfw_wheel_cb(int32_t delta, void *user) {
     customCfwContext *ctx = cfw_ctx_peek();
     (void)user;
     if (!ctx || !ctx->page_open || !delta) return;
+    if (delta > WHEEL_MAX_DELTA || delta < -WHEEL_MAX_DELTA) return;   /* not a crown delta */
     ctx->crown_accum += delta;
-    while (ctx->crown_accum >= CROWN_PER_DETENT) {
+    int sent = 0;
+    while (ctx->crown_accum >= CROWN_PER_DETENT && sent < WHEEL_MAX_PER_CALL) {
         cfw_gesture(ctx, GEST_SWIPE_UP, 0);
         ctx->crown_accum -= CROWN_PER_DETENT;
+        sent++;
     }
-    while (ctx->crown_accum <= -CROWN_PER_DETENT) {
+    while (ctx->crown_accum <= -CROWN_PER_DETENT && sent < WHEEL_MAX_PER_CALL) {
         cfw_gesture(ctx, GEST_SWIPE_DOWN, 0);
         ctx->crown_accum += CROWN_PER_DETENT;
+        sent++;
     }
+    if (ctx->crown_accum > CROWN_PER_DETENT * 2) ctx->crown_accum = CROWN_PER_DETENT * 2;
+    if (ctx->crown_accum < -CROWN_PER_DETENT * 2) ctx->crown_accum = -CROWN_PER_DETENT * 2;
 }
 
 void cfw_input_wheel_listen(customCfwContext *ctx, int on) {

@@ -49,7 +49,7 @@ static inline int fw_paired(void) { return FW(int (*)(void), FWA_rnlink_paired_s
 /* Launcher input (verified 2026-10-09 by disassembly): the crown is not an
  * LVGL indev. AppListView registers a raw wheel listener with
  * InputEventMonitor::registerRawWheelListener(monitor, fn, user), which
- * calls fn(user, delta) with raw wheel units (~600 per detent). */
+ * calls fn(delta, user) with raw wheel units (~600 per detent). */
 static inline void *fw_input_monitor(void) {
     void *mm = FW(void *(*)(void), FWA_monitor_manager_instance)();
     return mm ? FW(void *(*)(void *), FWA_monitor_manager_input)(mm) : 0;

@@ -34,6 +34,8 @@ final class Suite {
         var hold: TimeInterval = 15
         var expectedRevision = RayNeoIOFirmwareCatalog.cfwRevision
         var showHold: TimeInterval = 2
+        /// The glasses advertise slowly when dozing; scan this long.
+        var connectTimeout: TimeInterval = 180
     }
 
     typealias Body = (Suite) async throws -> String
@@ -64,7 +66,7 @@ final class Suite {
 
     lazy var cases: [Case] = [
         Case(id: "connect", group: "link", title: "scan, connect, AA55 handshake") { s in
-            try await s.link.connect(timeout: 60)
+            try await s.link.connect(timeout: s.options.connectTimeout)
             return "serial \(s.link.serial)"
         },
         Case(id: "version", group: "link", title: "OTA version reply is confirmed and idle") { s in

@@ -170,4 +170,77 @@ Same afternoon, two ports from the G2 CFW once the link was stable:
   depth × parallax) has no equivalent on a single canvas; the composer does
   have per-layer depth (`rayneo_lcdc_layer_fac_depth_update_partial`), so an
   element-depth design would mean one LVGL layer per depth level with its own
-  parallax. Display-driver work that cannot be done blind: parked.
+  parallax. Revision 5 takes the other route: own the per-eye raster and
+  bypass LVGL for presenting (see the revision 5 plan).
+
+## Revision 5 plan — parity with the G2 Glassly CFW, LVGL bypassed (direction set 2026-10-09)
+
+Match g2flash as closely as the hardware allows, protocol and behaviour, so
+the phone treats both devices the same. Decision (2026-10-09): revision 5
+stops drawing through LVGL. The G2 patch already has every piece (its own L8
+raster, per-lens compose, builtin font, direct framebuffer present), and the
+revision 3/4 code already rasterizes geometry, images and cached fonts into an
+L8 buffer; only the stock label text and the final present still go through
+LVGL objects. Bypassing it buys per-element depth for free (we own the per-eye
+raster), removes the theme/scroll/style fights from page.c, and makes the
+frame path identical to the G2's. LVGL keeps only two roles: the
+message_processor timer thread we already run on (the 33 ms frame timer stays
+an `lv_timer`), and the stock UI underneath us when no page is open.
+
+Design:
+
+* **Raster.** One 540×H L8 scene canvas rendered by scene.c/geom.c/anim.c as
+  today, then composed into two per-eye framebuffers, each element blitted at
+  `x ± depth × parallax` (left/right), exactly the G2's per-lens SHOW. The
+  phone passes `depth` through instead of zeroing it; no protocol change.
+* **Present.** Write the per-eye buffers to the LCDC layer directly through
+  whatever `lv_rayneo_fbdev_create`'s flush_cb calls (`rayneo_lcdc_layer_update`
+  and the per-eye parallax registers), not through `lv_disp_flush`. While a
+  page is open, stock LVGL flushes must not land on top of us: the
+  fbguard-lease equivalent is a retargeted call in the flush_cb that drops
+  flushes while `page_open` (one hook, like the ANCS site). On close, force a
+  full stock invalidate so the launcher repaints.
+* **First flash is a probe**, from the Mac: a build that writes a test
+  pattern through the driver call on PAGE_OPEN and reports the layer
+  geometry/format in DIAG, before any raster work moves over. The display
+  driver cannot be read blind: pixel format of the LCDC layer (L8 vs ARGB),
+  whether both eyes are one surface or two, and whether the flush_cb owns
+  the parallax write are the three facts the probe must settle.
+* **Text** needs the builtin bitmap font (G2 `TEXT(15)`) in firmware because
+  no LVGL label survives; the cached-font path (`draw_cached_font_text`)
+  already covers phone-rastered fonts.
+* **Input** stays below LVGL too: the raw wheel listener (done) and the HAL
+  key callback slot set by `hal_key_open` (0x184f6980) for the button, with
+  clicks swallowed while the page is open rather than fed to the launcher's
+  indev.
+
+In order:
+
+1. Display probe build (above); then move present to the direct path, keep
+   the LVGL screen only as an opaque black placeholder if the driver needs it.
+2. Per-eye compose with per-element depth; phone passes `depth` through.
+3. Builtin bitmap font (`TEXT(15)` and inline text) so no LVGL label is
+   needed; page.c drops its LVGL objects and styles.
+4. Button input via the HAL key callback; swallow while the page is open.
+5. `vector.c`: PATH records (SVG) and ROTATE ops, with the heap workspace.
+6. Object cache parity: LRU eviction + journal, MISSING id lists,
+   CAPACITY/evicted counts, asset pinning, the KEEP/FREEZE semantics exactly
+   as scene.c; texture options (transparent source color, inverse ramp).
+7. Page on wake (settings_ext wake takeover) via the display screen-state
+   callbacks, if the launcher's idle gate allows an overlay there.
+8. Direct-framebuffer modes (3/6, mode-8 bundles, mode 36): natural once the
+   present path is ours; enable when the phone starts selecting them.
+9. Compass (G2 `compass.c` equivalent). The hardware has a TDK IMU plus a
+   magnetometer on the sensor-hub core, reported to the AP over rpmsg
+   (`sensor_rpmsg_register_mag_data_handler` / `_sync_imu_mag_data_handler`,
+   `sensor_rpmsg_start_report_mag`, `tdk_mag_data_handler`). No fused
+   orientation is exported on the AP (the G2 patch read the stock
+   quaternion), so: subscribe to the synchronized IMU+mag stream while the
+   phone wants headings, compute a tilt-compensated heading from accel+mag
+   with a simple hard-iron calibration, report on change only as a new
+   0xF0 record (COMPASS `[kind][heading u16 deci-degrees][accuracy u8]`),
+   phone side like the G2 compass reports. `process_compass_info` is the
+   factory self-test parser, not this path.
+Not applicable: mic routing, R1 ring, ALS, BLE link profile, the Cordio
+keyboard bridge, the protobuf settings channel (business 0xF0 and the stock
+inflater replace them).

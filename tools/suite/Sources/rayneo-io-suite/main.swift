@@ -19,6 +19,7 @@ var filters: [String] = []
 var name: String?
 var verbose = false
 var hold: TimeInterval = 15
+var connectTimeout: TimeInterval = 180
 var revision = RayNeoIOFirmwareCatalog.cfwRevision
 var out: String?
 var list = false
@@ -35,11 +36,12 @@ while i < argv.count {
     case "--name": name = value()
     case "--verbose", "-v": verbose = true
     case "--hold": hold = TimeInterval(value()) ?? hold
+    case "--timeout": connectTimeout = TimeInterval(value()) ?? connectTimeout
     case "--revision": revision = Int(value()) ?? revision
     case "--out": out = value()
     case "--list": list = true
     case "--help", "-h":
-        print("usage: rayneo-io-suite [ids or groups…] [--list] [--name N] [--verbose] [--hold S] [--revision N] [--out FILE]")
+        print("usage: rayneo-io-suite [ids or groups…] [--list] [--name N] [--verbose] [--hold S] [--timeout S] [--revision N] [--out FILE]")
         exit(0)
     default: filters.append(a)
     }
@@ -56,6 +58,7 @@ Task { @MainActor in
     var suiteOptions = Suite.Options()
     suiteOptions.hold = hold
     suiteOptions.expectedRevision = revision
+    suiteOptions.connectTimeout = connectTimeout
     let suite = Suite(link: link, watcher: watcher, options: suiteOptions)
 
     if list {
