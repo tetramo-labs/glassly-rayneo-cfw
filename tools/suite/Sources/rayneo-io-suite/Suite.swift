@@ -98,7 +98,8 @@ final class Suite {
             guard ident.revision >= s.options.expectedRevision else { throw SuiteError.failed("revision \(ident.revision) < \(s.options.expectedRevision)") }
             guard ident.acceptsRawStreams, ident.acceptsCompressedRecords else { throw SuiteError.failed("flags \(ident.flags)") }
             guard ident.hasContext else { throw SuiteError.failed("no context at IDENT time (flags \(ident.flags))") }
-            guard ident.width == 540, ident.height == 180 else { throw SuiteError.failed("\(ident.width)x\(ident.height)") }
+            // revision 5 owns the panel's 220-row window; revision 4 pages were 540x180
+            guard ident.width == 540, ident.height == (ident.flags & 0x08 != 0 ? 220 : 180) else { throw SuiteError.failed("\(ident.width)x\(ident.height)") }
             return "\(ident.name) chunk \(ident.maxChunk) store \(ident.storeKiB) KiB flags 0x\(String(ident.flags, radix: 16))"
         },
         Case(id: "diag-rx", group: "cfw", title: "DIAG from the RX callback names the registry entry and a context") { s in
@@ -290,7 +291,7 @@ final class Suite {
             s.watcher.clear()
             let message = s.hideMessage(epoch: s.epoch)
             let crc = BinaryCodec.crc16CCITT(message) ^ 0x5A5A
-            var wire = Data([0x01, UInt8(message.count & 0xFF), UInt8(message.count >> 8), UInt8(crc & 0xFF), UInt8(crc >> 8)])
+            var wire = Data([s.lenses, UInt8(message.count & 0xFF), UInt8(message.count >> 8), UInt8(crc & 0xFF), UInt8(crc >> 8)])
             wire.append(message)
             s.sendStream(wire)
             let ack = try await s.ack(timeout: 3)
@@ -312,10 +313,10 @@ final class Suite {
             try s.requireAnimation()
             s.watcher.clear()
             var op = Data([4]); op.append(s.le32(40)); op.append(s.le16(380)); op.append(s.le16(40)); op.append(15); op.append(contentsOf: [0, 0, 255, 255])
+            let t0 = Date()
             try s.sendMessage(s.showMessage(puts: [], refs: [(40, 1)], flags: 0x05, ops: [op]), compress: false)
             let reply = try await s.cacheReply(timeout: 3)
             guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(reply.summary) }
-            let t0 = Date()
             let tag = try await s.settled(timeout: 4)
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
             guard tag == s.request else { throw SuiteError.failed("settled tag \(tag)") }
@@ -329,10 +330,10 @@ final class Suite {
             for v in [60, 20, 420, 140, 20] as [Int16] {
                 op.append(s.le16(v))
             }
+            let t0 = Date()
             try s.sendMessage(s.showMessage(puts: [], refs: [(40, 1)], flags: 0x05, ops: [op]), compress: false)
             let reply = try await s.cacheReply(timeout: 3)
             guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(reply.summary) }
-            let t0 = Date()
             let tag = try await s.settled(timeout: 5)
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
             guard tag == s.request, ms >= 700 else { throw SuiteError.failed("tag \(tag) after \(ms) ms") }
@@ -370,6 +371,48 @@ final class Suite {
             let tag = try await s.settled(timeout: 2)
             guard tag == s.request else { throw SuiteError.failed("settled tag \(tag)") }
             return "settled"
+        },
+        Case(id: "pingpong", group: "demo", title: "3D ping pong: the ball glides between a near and a far paddle (stereo, revision 5)") { s in
+            try s.requireAnimation()
+            guard s.lensCount == 2 else { throw SuiteError.skipped("single-lens firmware") }
+            // depth is a disparity: the left lens draws at x + depth, the right at x - depth
+            func lensX(_ x: Int16, _ depth: Int16, _ lens: UInt8) -> Int16 { lens == G2CfwTransport.lensLeft ? x + depth : x - depth }
+            let near: Int16 = 8, far: Int16 = -8
+            let startX: Int16 = 80, endX: Int16 = 440
+            s.watcher.clear()
+            try s.sendMessage(s.resetMessage(), compress: false)
+            _ = try await s.cacheReply(timeout: 3)
+            for lens in [G2CfwTransport.lensLeft, G2CfwTransport.lensRight] {
+                s.watcher.clear()
+                let table = s.rectRecord(filled: false, x: 20, y: 20, w: 500, h: 180, gray: 6)
+                let net = s.rectRecord(filled: true, x: 268, y: 20, w: 4, h: 180, gray: 4)
+                let left = s.rectRecord(filled: true, x: lensX(40, near, lens), y: 70, w: 10, h: 80, gray: 15)
+                let right = s.rectRecord(filled: true, x: lensX(490, far, lens), y: 70, w: 10, h: 80, gray: 15)
+                let ball = s.geomRecord(5, width: 0, [lensX(startX, near, lens), 60, 10]) // CIRCLE_FILL x y r
+                let puts = [s.putObject(id: 60, version: 1, record: table), s.putObject(id: 61, version: 1, record: net),
+                            s.putObject(id: 62, version: 1, record: left), s.putObject(id: 63, version: 1, record: right),
+                            s.putObject(id: 64, version: 1, record: ball)]
+                try s.sendMessage(s.showMessage(puts: puts, refs: [(60, 1), (61, 1), (62, 1), (63, 1), (64, 1)]), compress: false, targets: lens)
+                try await s.lensApplied(lens, what: "scene")
+            }
+            // six crossings: the ball glides from the near paddle to the far one and back,
+            // its disparity sliding from +8 to -8, so it travels away and comes back
+            var x = startX, depth = near, y: Int16 = 60
+            let ys: [Int16] = [60, 150, 90, 160, 70, 140]
+            for i in 0 ..< 6 {
+                let toX = x == startX ? endX : startX, toDepth = depth == near ? far : near, toY = ys[i]
+                for lens in [G2CfwTransport.lensLeft, G2CfwTransport.lensRight] {
+                    s.watcher.clear()
+                    let dx = lensX(toX, toDepth, lens) - lensX(x, depth, lens)
+                    var op = Data([4]); op.append(s.le32(64)); op.append(s.le16(dx)); op.append(s.le16(toY - y)); op.append(24); op.append(contentsOf: [0, 0, 255, 255])
+                    try s.sendMessage(s.showMessage(puts: [], refs: [], flags: 0x03, ops: [op]), compress: false, targets: lens)
+                    try await s.lensApplied(lens, what: "crossing \(i)")
+                }
+                x = toX; depth = toDepth; y = toY
+                try? await Task.sleep(nanoseconds: 900_000_000)
+            }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
+            return "6 crossings"
         },
         Case(id: "hide", group: "scene", title: "HIDE clears the page") { s in
             s.watcher.clear()
@@ -495,6 +538,15 @@ final class Suite {
             throw SuiteError.failed("lenses disagree: \(r.summary) vs \(other.summary)")
         }
         return r
+    }
+
+    /// One lens's applied REPLY and its ACK for the last record sent to it.
+    private func lensApplied(_ lens: UInt8, what: String) async throws {
+        guard await link.waitUntil(timeout: 3, { self.watcher.cacheReplies.contains { $0.lens == lens } }),
+              let reply = watcher.cacheReplies.first(where: { $0.lens == lens })
+        else { throw SuiteError.failed("\(what): no REPLY from lens \(lens)") }
+        guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed("\(what) lens \(lens): \(reply.summary)") }
+        guard await link.waitUntil(timeout: 3, { self.watcher.acks.contains { $0.lens == lens } }) else { throw SuiteError.failed("\(what) lens \(lens): no ACK") }
     }
 
     private func envelope(business: UInt8, type: Int, timeout: TimeInterval) async throws -> RayNeoIOEnvelope {

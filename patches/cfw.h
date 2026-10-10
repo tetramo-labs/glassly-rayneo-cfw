@@ -283,7 +283,7 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
  * handler. The first one that registers is used (a taken id is refused with -3). */
 #define UI_MODULE_FIRST  5u
 #define UI_MODULE_SECOND 3u
-#define UPLINK_MIN_GAP_MS 100u
+#define UPLINK_MIN_GAP_MS 25u      /* per-lens REPLY+ACK: four replies per SHOW since revision 5 */
 #define UPLINK_MAX 192u
 #define DOUBLE_TAP_MS 300u
 #define CROWN_PER_DETENT 600       /* raw wheel units per detent */
