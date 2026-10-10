@@ -267,14 +267,17 @@ void cfw_anim_settled(customCfwContext *ctx, cfw_lens *L) {
 
 void cfw_anim_stop(customCfwContext *ctx) {
     ctx->anim_active = 0;
-    if (ctx->anim_timer) { fw_timer_delete(ctx->anim_timer); ctx->anim_timer = 0; }
 }
 
-static void an_timer_cb(void *timer) {
-    (void)timer;
-    customCfwContext *ctx = cfw_ctx_peek();
-    if (!ctx) return;
-    if (!ctx->page_open || !ctx->anim_active) { cfw_anim_stop(ctx); return; }
+/* One animation frame, driven by the page's service timer (page.c) every
+ * CFW_ANIM_PERIOD_MS while anything moves: no LVGL timer is created or
+ * deleted per animation (the first revision 5 build lost frames that way). */
+void cfw_anim_tick(customCfwContext *ctx) {
+    if (!ctx->anim_active) return;
+    if (!ctx->page_open) { cfw_anim_stop(ctx); return; }
+    uint32_t now = fw_tick();
+    if (ctx->anim_last_tick && (now - ctx->anim_last_tick) < CFW_ANIM_PERIOD_MS) return;
+    ctx->anim_last_tick = now;
     int moving = 0;
     for (unsigned e = 0; e < 2; e++) {
         cfw_lens *L = &ctx->lens[e];
@@ -296,15 +299,6 @@ void cfw_anim_arm(customCfwContext *ctx) {
         if (cfw_anim_any(L)) any = 1; else cfw_anim_settled(ctx, L);
     }
     if (!any) { cfw_anim_stop(ctx); return; }
+    if (!ctx->anim_active) ctx->anim_last_tick = fw_tick();
     ctx->anim_active = 1;
-    if (!ctx->anim_timer) ctx->anim_timer = fw_timer_create((void *)an_timer_cb, CFW_ANIM_PERIOD_MS, 0);
-    if (!ctx->anim_timer) {           /* no timer: snap everything and settle */
-        for (unsigned e = 0; e < 2; e++) {
-            cfw_lens *L = &ctx->lens[e];
-            for (uint32_t i = 0; i < L->active_count; i++) an_finish(&L->objects[L->active_list[i]]);
-            cfw_scene_render(ctx, L);
-            cfw_anim_settled(ctx, L);
-        }
-        ctx->anim_active = 0;
-    }
 }

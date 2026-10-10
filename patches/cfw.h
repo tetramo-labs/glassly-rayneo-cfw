@@ -60,6 +60,11 @@ static inline int fw_wheel_register(void *monitor, void *fn, void *user) {
 static inline int fw_wheel_unregister(void *monitor, void *fn, void *user) {
     return FW(int (*)(void *, void *, void *), FWA_input_unregister_wheel)(monitor, fn, user);
 }
+/* Button driver interceptor chain: rayneo_register_btn_event_interceptor(name, cb)
+ * appends {name, cb} to the list rayneo_intercept_btn_event walks. */
+static inline void fw_btn_register(const char *name, void *cb) {
+    FW(void (*)(const char *, void *), FWA_btn_register)(name, cb);
+}
 static inline void fw_report_activity(void) { FW(void (*)(void), FWA_display_report_activity)(); }
 
 /* LVGL (v9). lv_obj_t / lv_timer_t / lv_display_t are opaque to us. */
@@ -285,9 +290,28 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define UI_MODULE_SECOND 3u
 #define UPLINK_MIN_GAP_MS 25u      /* per-lens REPLY+ACK: four replies per SHOW since revision 5 */
 #define UPLINK_MAX 192u
-#define DOUBLE_TAP_MS 300u
 #define CROWN_PER_DETENT 600       /* raw wheel units per detent */
 #define LONG_CLOSE_MS 2000u        /* a >2s press closes the page locally */
+/* RayNeo button driver events (rayneo_button_event_to_string), as
+ * rayneo_intercept_btn_event(event) hands them to the registered interceptors
+ * on the button poll thread. The crown button is not a BES HAL key. */
+#define BTN_EV_FIRST_PRESS  1
+#define BTN_EV_PRESS        2
+#define BTN_EV_CLICK        3
+#define BTN_EV_DOUBLE_CLICK 4
+#define BTN_EV_TRIPLE_CLICK 5
+#define BTN_EV_FIVE_CLICK   6
+#define BTN_EV_HOLD_1S      7
+#define BTN_EV_HOLD_3S      8
+#define BTN_EV_HOLD_5S      9
+#define BTN_EV_HOLD_8S      10
+#define BTN_EV_FAC_RESET    11
+#define BTN_EV_RELEASED     12
+/* interceptor list head (rayneo_intercept_btn_event's literal; build.py asserts it):
+ * nodes {name, cb, result, next}, walked in order until a cb returns nonzero */
+#define BTN_LIST_HEAD 0x1980fcd8u
+typedef struct cfw_btn_node { const char *name; int (*cb)(int); uint32_t result; struct cfw_btn_node *next; } cfw_btn_node;
+#define KEYQ_SIZE 16u
 
 #define CROWN_PER_DETENT_U 600u
 
@@ -399,7 +423,7 @@ typedef struct {
     cfw_lens lens[2];
     uint32_t epoch_revision;
     /* animation (anim.c, LVGL thread) */
-    void *anim_timer;
+    uint32_t anim_last_tick;       /* last frame advanced (page timer drives frames) */
     uint8_t anim_active;
 
     /* uplink pacing */
@@ -408,8 +432,10 @@ typedef struct {
     uint32_t last_uplink_tick;
 
     uint8_t wheel_listening;       /* raw wheel listener registered with InputEventMonitor */
+    uint8_t btn_hooked;            /* interceptor registered with the button driver (stays registered) */
+    volatile uint8_t keyq[KEYQ_SIZE];  /* button event ring, button thread writes, UI thread reads */
+    volatile uint8_t keyq_w, keyq_r;
     /* gestures */
-    uint32_t last_click_tick;
     int32_t crown_accum;
     uint32_t press_start_tick;
 
@@ -443,8 +469,9 @@ void cfw_page_ensure_timer(customCfwContext *ctx);
 void cfw_page_tick(customCfwContext *ctx);
 
 /* input.c */
-void cfw_input_attach(customCfwContext *ctx, void *root);
 void cfw_input_wheel_listen(customCfwContext *ctx, int on);
+void cfw_input_btn_listen(customCfwContext *ctx);
+void cfw_input_poll(customCfwContext *ctx);
 void cfw_gesture(customCfwContext *ctx, uint8_t type, uint8_t source);
 
 /* ident.c */
@@ -461,6 +488,7 @@ void cfw_anim_freeze_all(cfw_lens *L);
 int cfw_anim_any(const cfw_lens *L);
 void cfw_anim_arm(customCfwContext *ctx);
 void cfw_anim_stop(customCfwContext *ctx);
+void cfw_anim_tick(customCfwContext *ctx);
 void cfw_anim_settled(customCfwContext *ctx, cfw_lens *L);
 /* scene.c */
 void cfw_scene_render(customCfwContext *ctx, cfw_lens *L);

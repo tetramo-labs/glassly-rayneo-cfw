@@ -40,7 +40,6 @@ void cfw_page_ensure_ui(customCfwContext *ctx) {
         fw_obj_set_pos(root, 0, 0);
         fw_obj_add_flag(root, LV_FLAG_HIDDEN);
         ctx->page_root = root;
-        cfw_input_attach(ctx, root);
     }
     for (unsigned e = 0; e < 2; e++) {
         cfw_lens *L = &ctx->lens[e];
@@ -71,7 +70,9 @@ int cfw_page_open(customCfwContext *ctx, uint8_t *reason) {
     fw_obj_remove_flag(ctx->page_root, LV_FLAG_HIDDEN);
     ctx->page_open = 1;
     ctx->crown_accum = 0;
+    ctx->keyq_r = ctx->keyq_w = 0;
     cfw_input_wheel_listen(ctx, 1);
+    cfw_input_btn_listen(ctx);
     ctx->lease_deadline = fw_tick() + PAGE_LEASE_MS;
     fw_report_activity();
     /* take the panel: park the stock flush, present our (black) canvases */
@@ -106,6 +107,8 @@ void cfw_page_close(customCfwContext *ctx, uint8_t reason) {
 void cfw_page_tick(customCfwContext *ctx) {
     cfw_uplink_flush(ctx);
     if (!ctx->page_open) return;
+    cfw_input_poll(ctx);
+    cfw_anim_tick(ctx);
     uint32_t now = fw_tick();
     if ((int32_t)(now - ctx->lease_deadline) >= 0) {
         cfw_page_close(ctx, PAGE_LEASE);
@@ -117,6 +120,6 @@ void cfw_page_tick(customCfwContext *ctx) {
     }
     /* a present request the display thread never served (screen off) must
      * not block the next one forever */
-    if (ctx->disp_pan_pending && (now - ctx->disp_pan_tick) > 500u) ctx->disp_pan_pending = 0;
+    if (ctx->disp_pan_pending && (now - ctx->disp_pan_tick) > 1000u) ctx->disp_pan_pending = 0;
     if (ctx->disp_dirty && !ctx->disp_pan_pending) cfw_page_present(ctx);
 }

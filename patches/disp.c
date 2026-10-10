@@ -113,8 +113,8 @@ static int disp_fb_pattern(uint8_t *d, int touch_bounds) {
 static void g4_set(uint8_t *buf, uint32_t x, uint32_t y, uint8_t level) {
     if (x >= 540 || y >= G4_ROWS) return;
     uint8_t *b = buf + y * G4_STRIDE + G4_MARGIN + (x >> 1);
-    if (x & 1) *b = (uint8_t)((*b & 0x0f) | (level << 4));
-    else *b = (uint8_t)((*b & 0xf0) | level);
+    if (x & 1) *b = (uint8_t)((*b & 0xf0) | level);          /* right pixel: low nibble */
+    else *b = (uint8_t)((*b & 0x0f) | (level << 4));         /* left pixel: high nibble */
 }
 
 static void g4_rect(uint8_t *buf, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint8_t level) {
@@ -152,7 +152,8 @@ static int disp_dual_pattern(void) {
     return 0;
 }
 
-/* L8 lens canvases -> the LCDC pair (4 bpp, low nibble = left pixel): a lens
+/* L8 lens canvases -> the LCDC pair (4 bpp, HIGH nibble = left pixel, as the
+ * stock rgb565_to_g4_align_mve packs: `(p0 >> 3) & 0xf0 | p1 >> 7 & 0xf`): a lens
  * without a canvas shows the other one's, so a failed allocation degrades to
  * flat rather than one blind eye. */
 static void disp_compose_scene(customCfwContext *ctx) {
@@ -167,7 +168,7 @@ static void disp_compose_scene(customCfwContext *ctx) {
             cfw_zero(row, G4_MARGIN);
             uint8_t *d = row + G4_MARGIN;
             for (uint32_t x = 0; x < CFW_W; x += 2) {
-                *d++ = (uint8_t)((s[x] >> 4) | (s[x + 1] & 0xf0));
+                *d++ = (uint8_t)((s[x] & 0xf0) | (s[x + 1] >> 4));
             }
             cfw_zero(row + G4_MARGIN + G4_PX_BYTES, G4_STRIDE - G4_MARGIN - G4_PX_BYTES);
         }
@@ -189,6 +190,7 @@ void cfw_disp_pass(int on) {
 void cfw_page_present(customCfwContext *ctx) {
     ctx->disp_dirty = 1;
     if (!ctx->page_open || !ctx->disp_own || ctx->disp_pan_pending) return;
+    if (!fw_fb_get_power()) return;                  /* panel off: the display thread would skip it anyway */
     uint8_t *d = disp_driver(0);
     if (!d) return;
     int fd = (int)ld32(d + FBD_FD);

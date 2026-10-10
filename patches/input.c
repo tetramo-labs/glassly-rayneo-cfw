@@ -1,18 +1,10 @@
-/* Gesture capture on the Glassly page.
- *
- * An LVGL event callback on the page root turns stock input into the shared
- * gesture numbering and forwards it to the phone (business 0xF0, GESTURE). Only
- * fires while the page is open or the phone has sent QUERY this connection.
- *
- * UNVERIFIED: the crown/rotary path. On this panel the crown arrives on the
- * launcher's AppListView wheel hook (~600 raw units/detent); whether a
- * full-screen page receives it as an LVGL rotary event could not be confirmed
- * without a device. The key click/long-press path uses the documented
- * LV_EVENT_KEY codes 0x3a/0x3b. See docs/HOOKS.md.
+/* Gesture capture on the Glassly page: the crown through the launcher's raw
+ * wheel listener, the button through the button driver's interceptor chain
+ * (both below LVGL),
+ * forwarded to the phone as GESTURE replies (business 0xF0). Only while the
+ * page is open or the phone has sent QUERY this connection.
  */
 #include "cfw.h"
-
-#define LV_EVENT_ROTARY 0x5eu      /* lv_event_code_t LV_EVENT_ROTARY (v9); unverified on this build */
 
 void cfw_gesture(customCfwContext *ctx, uint8_t type, uint8_t source) {
     if (!ctx->page_open && !ctx->queried) return;
@@ -28,41 +20,77 @@ void cfw_gesture(customCfwContext *ctx, uint8_t type, uint8_t source) {
     cfw_uplink_push(ctx, b, sizeof(b));
 }
 
-static void cfw_event_cb(void *e) {
-    customCfwContext *ctx = (customCfwContext *)fw_event_user(e);
-    if (!ctx) return;
-    uint32_t code = fw_event_code(e);
-    if (code == LV_EVENT_KEY_CODE) {
-        uint32_t key = fw_event_key(e);
-        if (key == KEY_CLICK) {
-            uint32_t now = fw_tick();
-            if (ctx->last_click_tick && (now - ctx->last_click_tick) <= DOUBLE_TAP_MS) {
-                cfw_gesture(ctx, GEST_DOUBLE, 0);
-                ctx->last_click_tick = 0;
-            } else {
-                cfw_gesture(ctx, GEST_SINGLE, 0);
-                ctx->last_click_tick = now;
-            }
-        } else if (key == KEY_LONG) {
-            cfw_gesture(ctx, GEST_TAP_HOLD, 1);
-            ctx->press_start_tick = fw_tick();   /* arm the 2 s local close */
-        }
-    } else if (code == LV_EVENT_ROTARY) {
-        int32_t d = (int32_t)fw_event_key(e);    /* raw wheel delta */
-        ctx->crown_accum += d;
-        while (ctx->crown_accum >= CROWN_PER_DETENT) {
-            cfw_gesture(ctx, GEST_SWIPE_UP, 0);
-            ctx->crown_accum -= CROWN_PER_DETENT;
-        }
-        while (ctx->crown_accum <= -CROWN_PER_DETENT) {
-            cfw_gesture(ctx, GEST_SWIPE_DOWN, 0);
-            ctx->crown_accum += CROWN_PER_DETENT;
-        }
+/* ---- button: the RayNeo button driver's interceptor chain ---------------- */
+/* rayneo_intercept_btn_event(event) runs on the button poll thread and calls
+ * every registered interceptor cb(event) in list order until one returns
+ * nonzero; an intercepted event is neither published to the launcher by its
+ * key_monitor nor queued for the LVGL buttons indev. Stock order: the display
+ * manager (wake on FIRST_PRESS, user activity), key_monitor, sm_monitor
+ * (pairing on HOLD_5S). Ours is moved right behind the display manager's
+ * node, so a press still wakes the glasses while the launcher never sees the
+ * clicks the page owns. Holds of 3 s and more stay the system's. */
+#define BTN_CFW_NAME "glassly"
+
+static void keyq_push(customCfwContext *ctx, int event) {
+    uint8_t w = ctx->keyq_w, n = (uint8_t)((w + 1u) % KEYQ_SIZE);
+    if (n != ctx->keyq_r) { ctx->keyq[w] = (uint8_t)event; ctx->keyq_w = n; }
+}
+
+static int cfw_btn_interceptor(int event) {
+    customCfwContext *ctx = cfw_ctx_peek();
+    if (!ctx || !ctx->page_open) return 0;
+    switch (event) {
+    case BTN_EV_FIRST_PRESS:
+    case BTN_EV_RELEASED:
+        keyq_push(ctx, event);
+        return 0;                       /* press state flows on (indev, activity) */
+    case BTN_EV_CLICK:
+    case BTN_EV_DOUBLE_CLICK:
+    case BTN_EV_HOLD_1S:
+        keyq_push(ctx, event);
+        return 1;                       /* the page owns these */
+    default:
+        return 0;
     }
 }
 
-void cfw_input_attach(customCfwContext *ctx, void *root) {
-    fw_add_event_cb(root, (void *)cfw_event_cb, 0 /* LV_EVENT_ALL */, ctx);
+/* UI thread, first page open: register once and keep it (there is no
+ * unregister API); the callback checks page_open itself. */
+void cfw_input_btn_listen(customCfwContext *ctx) {
+    if (ctx->btn_hooked) return;
+    ctx->btn_hooked = 1;
+    fw_btn_register(BTN_CFW_NAME, (void *)cfw_btn_interceptor);   /* appends at the tail */
+    cfw_btn_node *h = *(cfw_btn_node *volatile *)BTN_LIST_HEAD;
+    if (!h || !h->next) return;
+    cfw_btn_node *p = h, *t = h->next;
+    while (t->next) { p = t; t = t->next; }
+    if (t->cb != cfw_btn_interceptor) return;                     /* registration refused (logged by the driver) */
+    if (p == h) return;                                           /* already second */
+    /* detach the tail first so the list stays valid for a concurrent walk */
+    p->next = 0;
+    t->next = h->next;
+    h->next = t;
+}
+
+/* UI thread (page timer): queued button events -> gestures. `source` carries
+ * the driver's event code so the logs show what the glasses reported. */
+void cfw_input_poll(customCfwContext *ctx) {
+    while (ctx->keyq_r != ctx->keyq_w) {
+        uint8_t event = ctx->keyq[ctx->keyq_r];
+        ctx->keyq_r = (uint8_t)((ctx->keyq_r + 1u) % KEYQ_SIZE);
+        switch (event) {
+        case BTN_EV_FIRST_PRESS:
+            ctx->press_start_tick = fw_tick();        /* the tick closes the page after LONG_CLOSE_MS held */
+            break;
+        case BTN_EV_RELEASED:
+            ctx->press_start_tick = 0;
+            break;
+        case BTN_EV_CLICK:        cfw_gesture(ctx, GEST_SINGLE, event); break;
+        case BTN_EV_DOUBLE_CLICK: cfw_gesture(ctx, GEST_DOUBLE, event); break;
+        case BTN_EV_HOLD_1S:      cfw_gesture(ctx, GEST_TAP_HOLD, event); break;
+        default: break;
+        }
+    }
 }
 
 /* Raw wheel listener (InputEventMonitor). The listener is called as

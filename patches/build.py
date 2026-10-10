@@ -88,6 +88,7 @@ FW_SYMBOLS = [
     ("monitor_manager_input", "rayneo::service::launcher::MonitorManager::getInputEventMonitor", None),
     ("input_register_wheel", "rayneo::service::launcher::InputEventMonitor::registerRawWheelListener", None),
     ("input_unregister_wheel", "rayneo::service::launcher::InputEventMonitor::unregisterRawWheelListener", None),
+    ("btn_register", "rayneo_register_btn_event_interceptor", None),
     ("ancs_notification_handler",
      "rayneo::service::notification::NotificationMessageHandler::handleAncsNotificationReceived", 0x107029D1),
     ("rnlink_paired_status", "real_get_rnlink_paired_status", None),
@@ -129,6 +130,7 @@ ANCS_STOCK_TARGET = 0x107029D1
 LCDC_SITES = [0x10755DB2, 0x10755E68]
 LCDC_STOCK_TARGET = 0x10754035
 SHIM_ASSERTS = [
+    (0x1075D03C, 0x1980FCD8),    # rayneo_intercept_btn_event's literal: the button interceptor list head (cfw.h BTN_LIST_HEAD)
     (0x106D9D9C, 0x19750D2C),    # &launcher business-15 callback table
     (0x106D9DA0, 0x106D97F1),    # its stock slot-0 data callback (preserved at [0])
 ]

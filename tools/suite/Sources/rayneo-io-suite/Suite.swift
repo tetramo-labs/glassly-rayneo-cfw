@@ -377,7 +377,7 @@ final class Suite {
             guard s.lensCount == 2 else { throw SuiteError.skipped("single-lens firmware") }
             // depth is a disparity: the left lens draws at x + depth, the right at x - depth
             func lensX(_ x: Int16, _ depth: Int16, _ lens: UInt8) -> Int16 { lens == G2CfwTransport.lensLeft ? x + depth : x - depth }
-            let near: Int16 = 8, far: Int16 = -8
+            let near: Int16 = 5, far: Int16 = -5
             let startX: Int16 = 80, endX: Int16 = 440
             s.watcher.clear()
             try s.sendMessage(s.resetMessage(), compress: false)
@@ -401,11 +401,19 @@ final class Suite {
             let ys: [Int16] = [60, 150, 90, 160, 70, 140]
             for i in 0 ..< 6 {
                 let toX = x == startX ? endX : startX, toDepth = depth == near ? far : near, toY = ys[i]
+                // both lens records in one stream: the firmware applies them in the
+                // same handler call, so the two glides start on the same frame tick
+                s.watcher.clear()
+                var stream = Data()
                 for lens in [G2CfwTransport.lensLeft, G2CfwTransport.lensRight] {
-                    s.watcher.clear()
                     let dx = lensX(toX, toDepth, lens) - lensX(x, depth, lens)
                     var op = Data([4]); op.append(s.le32(64)); op.append(s.le16(dx)); op.append(s.le16(toY - y)); op.append(24); op.append(contentsOf: [0, 0, 255, 255])
-                    try s.sendMessage(s.showMessage(puts: [], refs: [], flags: 0x03, ops: [op]), compress: false, targets: lens)
+                    guard let record = s.encoder.record(s.showMessage(puts: [], refs: [], flags: 0x03, ops: [op]), targets: lens, allLenses: s.lenses, compress: false)
+                    else { throw SuiteError.failed("framing") }
+                    stream.append(record)
+                }
+                s.sendStream(stream)
+                for lens in [G2CfwTransport.lensLeft, G2CfwTransport.lensRight] {
                     try await s.lensApplied(lens, what: "crossing \(i)")
                 }
                 x = toX; depth = toDepth; y = toY
@@ -496,9 +504,12 @@ final class Suite {
         guard ident.revision >= 4 else { throw SuiteError.skipped("needs revision 4, glasses run \(ident.revision)") }
     }
 
+    /// Every lens reports SETTLED; wait for all of them so a straggler never
+    /// counts for the next case, and return the last (they carry one tag).
     private func settled(timeout: TimeInterval) async throws -> UInt16 {
-        guard await link.waitUntil(timeout: timeout, { !self.watcher.settled.isEmpty }), let tag = watcher.settled.first
-        else { throw SuiteError.failed("no SETTLED in \(timeout) s") }
+        let n = lensCount
+        guard await link.waitUntil(timeout: timeout, { self.watcher.settled.count >= n }), let tag = watcher.settled.last
+        else { throw SuiteError.failed("no SETTLED from \(n) lens(es) in \(timeout) s (got \(watcher.settled.count))") }
         return tag
     }
 

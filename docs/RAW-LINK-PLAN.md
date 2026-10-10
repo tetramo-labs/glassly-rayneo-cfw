@@ -209,10 +209,14 @@ Design:
 * **Text** needs the builtin bitmap font (G2 `TEXT(15)`) in firmware because
   no LVGL label survives; the cached-font path (`draw_cached_font_text`)
   already covers phone-rastered fonts.
-* **Input** stays below LVGL too: the raw wheel listener (done) and the HAL
-  key callback slot set by `hal_key_open` (0x184f6980) for the button, with
-  clicks swallowed while the page is open rather than fed to the launcher's
-  indev.
+* **Input** stays below LVGL too: the raw wheel listener (done) and, for the
+  button, an interceptor in the RayNeo button driver's chain
+  (`rayneo_register_btn_event_interceptor`, walked by
+  `rayneo_intercept_btn_event` on the button poll thread; the button is not a
+  BES HAL key). Ours sits right behind the display manager's wake interceptor,
+  so a press still wakes the glasses, and returns 1 for CLICK, DOUBLE_CLICK
+  and HOLD_1S while the page is open: the launcher's key monitor never
+  publishes them and the LVGL buttons indev never queues them.
 
 Display driver, read from the stock image (2026-10-09, before the probe ran):
 
@@ -273,8 +277,11 @@ Probe results on hardware (2026-10-09, build 840fd9a1…):
   are retargeted to `cfw_lcdc_hook`, which presents the module's eye buffers
   while `disp_own` is set and forwards to the stock otherwise. Eye buffer
   layout (`rayneo_lcdc_visible_row_ptr`): 280 rows × 302 bytes, each row
-  16 B margin + 270 B pixels (540 px, 4 bpp) + 16 B margin, the parallax a
-  byte shift into the margins (`rayneo_lcdc_clamp_g4_xoffset`, ±16);
+  16 B margin + 270 B pixels (540 px, 4 bpp, the LEFT pixel of a pair in
+  the HIGH nibble: `rgb565_to_g4_align_mve`'s scalar tail packs
+  `(p0 >> 3) & 0xf0 | (p1 >> 7) & 0xf`; the first compose had it backwards
+  and swapped every column pair, which garbled text) + 16 B margin, the
+  parallax a byte shift into the margins (`rayneo_lcdc_clamp_g4_xoffset`, ±16);
   rows 0..278 go out in one transfer and row 279 separately. The panel is
   540×280; the launcher draws 220 rows of it at a configurable y offset.
 * Presenting the pair with `rayneo_lcdc_layer_dual_update_full` drifted a
@@ -307,7 +314,7 @@ In order:
 1. Display probe build: done (see above).
 2. Per-eye compose, a scene per lens, phone passes `depth` through: built.
 3. Builtin bitmap font, page.c without LVGL drawing: built.
-4. Button input via the HAL key callback; swallow while the page is open.
+4. Button input via the button driver's interceptor chain: built (2026-10-09 late).
 5. `vector.c`: PATH records (SVG) and ROTATE ops, with the heap workspace.
 6. Object cache parity: built (2026-10-09 night): 256 objects per lens,
    128 assets, a granule-bitmap store with free, LRU eviction (unreferenced
