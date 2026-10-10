@@ -315,18 +315,25 @@ In order:
 2. Per-eye compose, a scene per lens, phone passes `depth` through: built.
 3. Builtin bitmap font, page.c without LVGL drawing: built.
 4. Button input via the button driver's interceptor chain: built (2026-10-09 late).
-5. `vector.c`: PATH records (SVG) and ROTATE ops, with the heap workspace.
+5. `vector.c`: PATH records (SVG) and ROTATE ops, with the heap workspace: built
+   (2026-10-10, revision 6; the G2 compiler and rotation, filled through the
+   anti-aliased coverage rows; tools/host/run_vector_tests.sh checks the
+   g2flash pixel probes on the host).
 6. Object cache parity: built (2026-10-09 night): 256 objects per lens,
    128 assets, a granule-bitmap store with free, LRU eviction (unreferenced
    assets first, then the least recently used object that is neither active
    nor pinned by the SHOW being applied), MISSING id lists, the [evicted]
-   and RESET [evicted][store KiB] reply extras. Still open: the journal
-   (DELTA/SNAPSHOT), texture options.
+   and RESET [evicted][store KiB] reply extras. The journal (STATE: UNCHANGED /
+   DELTA / SNAPSHOT, DROP, PERIOD) followed on 2026-10-10 (revision 6, a
+   64-entry ring per lens, asset events in both). Still open: texture options.
    Also built: anti-aliased geometry (geom.c: four sub-rows per pixel row,
    Q4 spans into a coverage row blended with the record's gray) and the
    g2flash shapes suite ported to tools/g2suite over the harness bridge
    (`rayneo-io bridge`): 43 cases, the same data and pipeline as on the G2.
-7. Page on wake (settings_ext wake takeover) via the display screen-state
+7. Connect screen text (hint.c, 2026-10-10): DisconnectView's hint label
+   reads "Glassly CFW v6 / Open the Glassly App to connect" through two
+   retargeted calls in ensureHintLabel (GetText, RegisterLabel).
+8. Page on wake (settings_ext wake takeover) via the display screen-state
    callbacks, if the launcher's idle gate allows an overlay there.
 8. Direct-framebuffer modes (3/6, mode-8 bundles, mode 36): natural once the
    present path is ours; enable when the phone starts selecting them.

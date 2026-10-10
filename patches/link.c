@@ -121,7 +121,7 @@ static void send_reply(customCfwContext *ctx, uint8_t lens, uint8_t mode, uint16
     cfw_put16(b + 6, request);
     b[8] = status;
     cfw_put16(b + 9, epoch);
-    cfw_put32(b + 11, ctx->epoch_revision);
+    cfw_put32(b + 11, ctx->lens[lens == LENS_RIGHT ? 1 : 0].revision);   /* the lens's journal revision */
     if (extra_len > REPLY_EXTRA_MAX) extra_len = REPLY_EXTRA_MAX;
     for (uint8_t i = 0; i < extra_len; i++) b[15 + i] = extra[i];
     cfw_uplink_push(ctx, b, (uint8_t)(15 + extra_len));
@@ -179,7 +179,7 @@ static void cfw_record(customCfwContext *ctx, const uint8_t *wire, uint32_t tota
         uint8_t extra_len = 0;
         int handled = dlen >= 5 ? cfw_scene_message(ctx, L, data, dlen, &status, &request, first, extra, &extra_len) : 0;
         if (handled) {
-            send_reply(ctx, lb, data[0], request, status, (uint16_t)(data[1] | (data[2] << 8)), extra, extra_len);
+            send_reply(ctx, lb, data[0], request, status, ctx->stream.epoch, extra, extra_len);   /* the current epoch, as the G2 */
             send_ack(ctx, lb, RPL_ACK, (uint16_t)dlen, crc);
         } else {
             send_ack(ctx, lb, RPL_NACK, (uint16_t)dlen, crc);

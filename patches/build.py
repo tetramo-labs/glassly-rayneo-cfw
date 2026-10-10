@@ -129,6 +129,13 @@ ANCS_STOCK_TARGET = 0x107029D1
 # present while the module holds a frame and forwards to the stock otherwise.
 LCDC_SITES = [0x10755DB2, 0x10755E68]
 LCDC_STOCK_TARGET = 0x10754035
+# Connect screen (hint.c): inside DisconnectView::ensureHintLabel, the
+# `bl I18nManager::GetText` that fetches the hint text and the
+# `bl I18nManager::RegisterLabel` that would let a language change rewrite it.
+HINT_SITES = [
+    (0x10794C2A, 0x107D9FF1, "cfw_disconnect_hint", "DisconnectView::ensureHintLabel: bl I18nManager::GetText -> cfw_disconnect_hint (connect screen text)"),
+    (0x10794C7E, 0x107DA601, "cfw_hint_unregistered", "DisconnectView::ensureHintLabel: bl I18nManager::RegisterLabel -> cfw_hint_unregistered (keep our text)"),
+]
 SHIM_ASSERTS = [
     (0x1075D03C, 0x1980FCD8),    # rayneo_intercept_btn_event's literal: the button interceptor list head (cfw.h BTN_LIST_HEAD)
     (0x106D9D9C, 0x19750D2C),    # &launcher business-15 callback table
@@ -491,6 +498,15 @@ def build_ap(ap, src=None):
                     "desc": f"rayneo_pandisp_exec @{site:#x}: bl rayneo_lcdc_layer_update -> cfw_lcdc_hook (display present)"})
         lcdc_hooks.append({"site": hex(site), "len": 4, "old": stock.hex(), "new": new.hex(),
                            "purpose": "call cfw_lcdc_hook instead of rayneo_lcdc_layer_update (forwards unless the module holds a frame)"})
+
+    # 2d. Connect screen: the hint label's text and its i18n registration.
+    for site, stock_target, func, desc in HINT_SITES:
+        stock = _branch_bytes(site, stock_target, link=True)
+        if ap[off(site):off(site) + 4] != stock:
+            raise BuildError(f"hint site {site:#x} is not the expected bl")
+        new = _branch_bytes(site, (module_va + funcs[func]) | 1, link=True)
+        ops.append({"offset": off(site), "old": stock.hex(), "new": new.hex(), "desc": desc})
+        lcdc_hooks.append({"site": hex(site), "len": 4, "old": stock.hex(), "new": new.hex(), "purpose": desc})
 
     # 3. Relocate the build-info footer and append the module 32-byte aligned.
     pad = module_at - footer_at           # old footer bytes become zero padding

@@ -159,8 +159,9 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 5u
-#define REV_STRING "GLASSLYCFW-IO/5"
+#define REV_MAJOR 6u
+#define REV_TEXT  "6"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
+#define REV_STRING "GLASSLYCFW-IO/6"
 #define MAX_CHUNK 240u
 #define STORE_KIB 64u
 /* IDENT flags: bit0 = zlib COMPRESSED records accepted; bit1 = raw stream packets
@@ -207,6 +208,11 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define MSG_PUT   37u
 #define MSG_HIDE  39u
 #define MSG_SHOW  38u
+#define MSG_STATE 40u   /* [40][epoch][revision u32][page u16]: UNCHANGED / DELTA / SNAPSHOT (G2 scene.c) */
+/* CONTROL (41) sub-commands: [41][epoch][request][sub]... */
+#define CTL_RESET  0u   /* [cap]  drop everything, adopt `epoch` */
+#define CTL_DROP   1u   /* [n][id u32 x n]  drop inactive objects (an active one refuses) */
+#define CTL_PERIOD 2u   /* [ms]  animation frame period 10..250 */
 /* PUT entry kinds */
 #define PUT_ASSET  0x00u
 #define PUT_OBJECT 0x01u
@@ -228,6 +234,7 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define SH_ARC        12u
 #define SH_PIE        13u
 #define SH_IMAGE      14u
+#define SH_PATH       18u          /* [18][flags][gray][rule][x][y][scale Q8 u16][len u16][commands] (vector.c) */
 /* SHOW flags and ops (G2 scene.c; anim.c) */
 #define SHOW_FLAG_PRESENT 0x01u
 #define SHOW_FLAG_KEEP    0x02u
@@ -244,10 +251,39 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define TWEEN_COLOR_BIT  0x100u
 #define TWEEN_WIDTH_BIT  0x200u
 #define TWEEN_MASK_VALID 0x3ffu
+#define REFUSE_ASSET  2u           /* path commands failed to compile */
 #define REFUSE_TARGET 3u           /* op target not active / wrong type */
-#define REFUSE_MASK   4u           /* tween mask outside the type's range */
+#define REFUSE_MASK   4u           /* tween mask or value outside the type's range */
+#define REFUSE_ACTIVE 5u           /* DROP of an active object */
+#define REFUSE_EDGES  6u           /* active paths exceed the edge budget */
 #define OBJ_VISIBLE   0x01u        /* cfw_object.flags */
-#define CFW_ANIM_PERIOD_MS 33u
+#define CFW_ANIM_PERIOD_MS 33u     /* default; CONTROL sub 2 sets ctx->anim_period_ms */
+/* paths and rotation (vector.c, the G2 VECTOR_PROTOCOL.md): compiled SVG
+ * commands become Q4 edges in the store, a private block of the object */
+#define PATH_MAX_EDGES    512u
+#define PATH_MAX_BYTES    8192u
+#define PATH_MAX_COMMANDS 1024u
+#define PATH_SCENE_EDGES  2048u    /* per lens, per SHOW (the G2 allows 4096 on its 256 KiB store) */
+typedef struct { int32_t x0, y0, x1, y1; } cfw_edge;
+typedef struct {
+    uint16_t count;
+    uint8_t rule;                  /* 0 nonzero, 1 even-odd */
+    uint8_t pad;
+    cfw_edge edges[];
+} cfw_path;
+typedef struct {
+    int32_t angle, from, to;       /* unwrapped degrees * 256 */
+    int16_t px, py;                /* panel-space pivot, pixels */
+    uint32_t started;              /* tick (ms) */
+    uint16_t duration;             /* ms; 0 idle */
+    uint8_t curve[4];
+} cfw_rotation;
+/* heap workspace (fw_memalign on first use), UI thread only */
+typedef struct {
+    cfw_edge edges[PATH_MAX_EDGES];
+    int32_t xs[PATH_MAX_EDGES];
+    int8_t winds[PATH_MAX_EDGES];
+} cfw_vector_work;
 #define SH_TEXT        15u         /* builtin-font string asset: [15][1][gray][0][x][y][asset u32] */
 #define SH_TEXT_CACHED 16u
 #define SH_TEXT_INLINE 17u
@@ -265,11 +301,23 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define DIAG_SRC_RX 1u             /* sent from the RNLink RX callback */
 #define DIAG_SRC_UI 2u             /* queued from the LVGL message handler */
 /* REPLY status */
-#define ST_APPLIED  0u
-#define ST_STALE    1u
-#define ST_MISSING  2u
-#define ST_CAPACITY 3u
-#define ST_REFUSED  4u
+#define ST_APPLIED   0u
+#define ST_STALE     1u
+#define ST_MISSING   2u
+#define ST_CAPACITY  3u
+#define ST_REFUSED   4u
+#define ST_UNCHANGED 5u            /* STATE: the phone is at the current revision */
+#define ST_DELTA     6u            /* STATE: extra [n][(kind, id, version) x n], version 0 = gone */
+#define ST_SNAPSHOT  7u            /* STATE: extra [total u16][page u16][n][(kind, id, version, last_use) x n] */
+#define ST_RESET     8u            /* STATE before any RESET this session */
+#define CACHE_JOURNAL 64u          /* per lens, as the G2 */
+#define JOURNAL_OBJECT 0u
+#define JOURNAL_ASSET  1u
+typedef struct {
+    uint32_t id;
+    uint32_t version;              /* 0 = evicted or dropped; bit 31 = asset */
+    uint32_t revision;             /* lens revision that recorded it */
+} cfw_journal_entry;
 /* gesture event types (shared G2 numbering) */
 #define GEST_SINGLE 0u
 #define GEST_SWIPE_UP 1u
@@ -337,12 +385,15 @@ typedef struct {
     int16_t from[8], to[8];        /* tween endpoints while frames != 0 */
     uint32_t last_use;             /* use clock when last put or shown (LRU eviction) */
     uint8_t type, options, color, active;
-    uint8_t width;                 /* geometry stroke width (record byte 3) */
+    uint8_t width;                 /* geometry stroke width (record byte 3); PATH: fill rule */
     uint8_t flags;                 /* OBJ_VISIBLE */
     uint8_t pinned;                /* referenced by the SHOW being applied: not evictable */
     uint8_t frame, frames;         /* animation progress; frames 0 = idle */
     uint8_t curve[4];              /* cubic-bezier easing x1 y1 x2 y2, /255 */
     uint8_t color_from, color_to, width_from, width_to;
+    uint32_t path_off;             /* PATH: store offset of its cfw_path block (path_bytes long) */
+    uint16_t path_bytes;
+    cfw_rotation rotation;         /* ROTATE channel, independent of the geometry tween */
 } cfw_object;
 
 /* decoded message / record-assembly sizes */
@@ -384,6 +435,13 @@ typedef struct {
     uint8_t settle_pending;        /* a tagged SHOW has not reported SETTLED yet */
     uint16_t settle_tag;
     uint16_t last_show_request;    /* a repeated SHOW/HIDE request id is acknowledged, not re-applied */
+    /* cache journal (STATE replies): every definition, completion, eviction
+     * and drop this lens's phone mirror must learn about */
+    uint32_t revision;             /* mutation counter, journaled; the REPLY's revision word */
+    uint32_t journal_lost_rev;     /* highest revision overwritten out of the ring */
+    uint8_t journal_head, journal_count;
+    uint8_t mutated;               /* a note landed while applying the current message */
+    cfw_journal_entry journal[CACHE_JOURNAL];
 } cfw_lens;
 
 typedef struct {
@@ -421,10 +479,13 @@ typedef struct {
     uint32_t evicted;              /* objects evicted while applying the current message */
     cfw_asset assets[CACHE_ASSETS];
     cfw_lens lens[2];
-    uint32_t epoch_revision;
+    uint8_t cache_ready;           /* a RESET established the session (STATE answers RESET before) */
+    uint8_t refuse_reason;         /* REFUSE_* of the message being applied (REPLY extra) */
+    cfw_vector_work *vector_work;  /* paths and rotation (vector.c), allocated on first use */
     /* animation (anim.c, LVGL thread) */
     uint32_t anim_last_tick;       /* last frame advanced (page timer drives frames) */
     uint8_t anim_active;
+    uint8_t anim_period_ms;        /* CONTROL sub 2; 0 = CFW_ANIM_PERIOD_MS */
 
     /* uplink pacing */
     cfw_uplink uplink[UPLINK_QUEUE];
@@ -458,6 +519,9 @@ void *memcpy(void *d, const void *s, size_t n);
 void *memset(void *d, int c, size_t n);
 void *memmove(void *d, const void *s, size_t n);
 int memcmp(const void *a, const void *b, size_t n);
+void __aeabi_memclr(void *d, size_t n);
+void __aeabi_memclr4(void *d, size_t n);
+void __aeabi_memclr8(void *d, size_t n);
 
 /* scene.c */
 
@@ -480,9 +544,16 @@ void cfw_diag_direct(const customCfwContext *ctx);
 void cfw_send_diag(customCfwContext *ctx);
 void cfw_send_page_state(customCfwContext *ctx, uint8_t state, uint8_t reason);
 
+/* vector.c */
+cfw_vector_work *cfw_vec_work(customCfwContext *ctx);
+int cfw_vec_compile(cfw_vector_work *w, const uint8_t *src, uint32_t len);
+void cfw_vec_path_draw(customCfwContext *ctx, cfw_vector_work *w, const cfw_path *path, const int16_t *p, const cfw_rotation *t);
+void cfw_vec_shape_draw(customCfwContext *ctx, cfw_vector_work *w, const cfw_object *o);
+int cfw_vec_rotated(const cfw_rotation *t);
+
 /* anim.c */
 uint32_t cfw_op_len(const uint8_t *p, uint32_t avail);
-uint8_t cfw_op_check(cfw_lens *L, const uint8_t *p, uint8_t *reason);
+uint8_t cfw_op_check(customCfwContext *ctx, cfw_lens *L, const uint8_t *p, uint8_t *reason);
 void cfw_op_apply(cfw_lens *L, const uint8_t *p);
 void cfw_anim_freeze_all(cfw_lens *L);
 int cfw_anim_any(const cfw_lens *L);
@@ -496,7 +567,8 @@ void cfw_scene_hide(customCfwContext *ctx, cfw_lens *L);
 void cfw_scene_reset(customCfwContext *ctx, uint8_t cap);
 /* `extra` (<= REPLY_EXTRA_MAX bytes, length in *extra_len) follows the REPLY's
  * revision word: [evicted] after APPLIED/CAPACITY, [evicted][store KiB u16]
- * after a RESET, [n][more][id u32 x n] after MISSING (G2 scene.c). */
+ * after a RESET, [n][more][id u32 x n] after MISSING, [reason] after REFUSED,
+ * the journal entries after DELTA, a page after SNAPSHOT (G2 scene.c). */
 #define REPLY_EXTRA_MAX 170u
 int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len,
                       uint8_t *status, uint16_t *request, int first, uint8_t *extra, uint8_t *extra_len);
@@ -511,6 +583,10 @@ void cfw_geom_draw(customCfwContext *ctx, uint8_t type, uint8_t width, const int
 int cfw_uplink_push(customCfwContext *ctx, const uint8_t *data, uint8_t len);
 void cfw_uplink_flush(customCfwContext *ctx);
 void cfw_control(customCfwContext *ctx, uint8_t ctrl, uint8_t arg);
+
+/* hint.c */
+const char *cfw_disconnect_hint(void *i18n, const char *key);
+void cfw_hint_unregistered(void *i18n, void *label, const char *key);
 
 /* disp.c */
 void cfw_display_probe(customCfwContext *ctx, uint8_t mode);

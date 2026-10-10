@@ -12,7 +12,8 @@
  *   [5][id][mask u16][frames u8][curve x4][i16 per bit]   TWEEN  (bits 0-7 = p0..p7,
  *                                                         0x100 color, 0x200 width)
  *   [6][id]  FREEZE      [7][id]  FINISH
- *   [9][id]... ROTATE is refused (reason 3): no rotated primitives on RayNeo.
+ *   [9][id][angle i32 deg*256][pivot x i16][pivot y i16][ms u16][curve x4]  ROTATE
+ *          (geometry 1..13 and paths; an independent channel clocked in ms)
  * Easing is Q15 with no 64-bit division (as on the G2). Everything here runs
  * on the LVGL thread: the message handler applies, the timer advances. */
 #include "cfw.h"
@@ -83,6 +84,7 @@ static uint32_t an_tween_mask(uint8_t type) {
     case SH_QUAD: case SH_QUAD_FILL: case SH_BEZIER3: return 0x3ffu;
     case SH_IMAGE: case SH_TEXT_CACHED: return 0x103u;
     case SH_TEXT_INLINE: return 0x10fu;
+    case SH_PATH:        return 0x107u;   /* x, y, Q8 scale, color */
     default:             return 0;
     }
 }
@@ -96,9 +98,25 @@ static void an_snap_end(cfw_object *o) {
     o->frame = 0;
 }
 
-static void an_finish(cfw_object *o) { if (o->frames) an_snap_end(o); }
+/* The rotation channel runs on the ms tick, not on frames (G2 scene.c). */
+static void an_rot_advance(cfw_rotation *t, uint32_t now) {
+    if (!t->duration) return;
+    uint32_t elapsed = now - t->started;
+    if (elapsed >= t->duration) { t->angle = t->to; t->duration = 0; return; }
+    uint32_t prog = an_ease_progress(elapsed * 32768u / t->duration, t->curve);
+    t->angle = an_lerp_q15(t->from, t->to, prog);
+}
 
-static void an_freeze(cfw_object *o) { o->frames = 0; o->frame = 0; }
+static void an_finish(cfw_object *o) {
+    if (o->frames) an_snap_end(o);
+    if (o->rotation.duration) { o->rotation.angle = o->rotation.to; o->rotation.duration = 0; }
+}
+
+static void an_freeze(cfw_object *o) {
+    o->frames = 0; o->frame = 0;
+    an_rot_advance(&o->rotation, fw_tick());
+    o->rotation.duration = 0;
+}
 
 /* Begin an eased move from the current values to `to`, `color_to`, `width_to` over `frames`. */
 static void an_animate(cfw_object *o, const int16_t *to, uint8_t color_to, uint8_t width_to,
@@ -139,9 +157,13 @@ static void an_glide(cfw_object *o, int32_t dx, int32_t dy, uint8_t frames, cons
 /* Advance every active object one frame; 1 while any is still moving. */
 static int an_advance(cfw_lens *L) {
     int moving = 0;
+    uint32_t now = fw_tick();
     for (uint32_t i = 0; i < L->active_count; i++) {
         cfw_object *o = &L->objects[L->active_list[i]];
-        if (o->id == 0 || o->frames == 0) continue;
+        if (o->id == 0) continue;
+        an_rot_advance(&o->rotation, now);
+        if (o->rotation.duration) moving = 1;
+        if (o->frames == 0) continue;
         uint32_t frame = (uint32_t)o->frame + 1u;
         if (frame >= o->frames) { an_snap_end(o); continue; }
         uint32_t prog = an_ease_progress(frame * 32768u / o->frames, o->curve);
@@ -157,7 +179,7 @@ static int an_advance(cfw_lens *L) {
 int cfw_anim_any(const cfw_lens *L) {
     for (uint32_t i = 0; i < L->active_count; i++) {
         const cfw_object *o = &L->objects[L->active_list[i]];
-        if (o->id != 0 && o->frames) return 1;
+        if (o->id != 0 && (o->frames || o->rotation.duration)) return 1;
     }
     return 0;
 }
@@ -179,7 +201,12 @@ uint32_t cfw_op_len(const uint8_t *p, uint32_t avail) {
     case OP_GLIDE:   need = 14u; break;
     case OP_FREEZE:
     case OP_FINISH:  need = 5u; break;
-    case OP_ROTATE:  need = 19u; break;
+    case OP_ROTATE: {
+        if (avail < 19u) return 0;
+        int32_t angle = (int32_t)rd32(p + 5);
+        if (angle < -360 * 256 * 100 || angle > 360 * 256 * 100) return 0;
+        need = 19u; break;
+    }
     case OP_TWEEN: {
         if (avail < 12u) return 0;
         uint32_t mask = rd16(p + 5);
@@ -196,15 +223,24 @@ uint32_t cfw_op_len(const uint8_t *p, uint32_t avail) {
 
 /* Semantic check against the incoming active set (objects marked `active`):
  * ST_APPLIED, or a REFUSED reason in *reason. */
-uint8_t cfw_op_check(cfw_lens *L, const uint8_t *p, uint8_t *reason) {
+uint8_t cfw_op_check(customCfwContext *ctx, cfw_lens *L, const uint8_t *p, uint8_t *reason) {
     uint32_t id = rd32(p + 1);
-    if (p[0] == OP_ROTATE) { *reason = REFUSE_TARGET; return ST_REFUSED; }
     if (id == OP_ALL_OBJECTS) return ST_APPLIED;
     cfw_object *o = object_find(L, id);
     if (!o || !o->active) { *reason = REFUSE_TARGET; return ST_REFUSED; }
-    if (p[0] == OP_TWEEN) {
+    if (p[0] == OP_ROTATE) {
+        if (o->type > SH_PIE && o->type != SH_PATH) { *reason = REFUSE_TARGET; return ST_REFUSED; }
+        if (!cfw_vec_work(ctx)) return ST_CAPACITY;
+    } else if (p[0] == OP_TWEEN) {
         uint32_t mask = rd16(p + 5);
         if (mask & ~an_tween_mask(o->type)) { *reason = REFUSE_MASK; return ST_REFUSED; }
+        if (o->type == SH_PATH) {
+            const uint8_t *v = p + 12;
+            for (uint32_t k = 0; k < 10; k++) if (mask & (1u << k)) {
+                int32_t value = (int16_t)rd16(v); v += 2;
+                if ((k == 2 && (value < 0 || value > 2048)) || (k == 8 && (value < 0 || value > 15))) { *reason = REFUSE_MASK; return ST_REFUSED; }
+            }
+        }
     }
     return ST_APPLIED;
 }
@@ -238,6 +274,17 @@ static void an_apply_one(cfw_object *o, const uint8_t *p) {
     }
     case OP_FREEZE: an_freeze(o); break;
     case OP_FINISH: an_finish(o); break;
+    case OP_ROTATE: {
+        cfw_rotation *t = &o->rotation;
+        uint32_t now = fw_tick();
+        an_rot_advance(t, now);            /* retarget from the elapsed current angle */
+        t->from = t->angle; t->to = (int32_t)rd32(p + 5);
+        t->px = (int16_t)rd16(p + 9); t->py = (int16_t)rd16(p + 11);
+        t->duration = (uint16_t)rd16(p + 13); t->started = now;
+        for (uint32_t k = 0; k < 4; k++) t->curve[k] = p[15 + k];
+        if (!t->duration) t->angle = t->to;
+        break;
+    }
     default: break;
     }
 }
@@ -272,18 +319,30 @@ void cfw_anim_stop(customCfwContext *ctx) {
 /* One animation frame, driven by the page's service timer (page.c) every
  * CFW_ANIM_PERIOD_MS while anything moves: no LVGL timer is created or
  * deleted per animation (the first revision 5 build lost frames that way). */
+/* Frames are due every `period` ms of wall time, whatever the timer's phase:
+ * the first build gated on "at least a period since the last frame", which
+ * with a 25 ms timer meant a frame every 50 ms and glides half speed. Now a
+ * tick advances every whole period elapsed (bounded catch-up when a render
+ * ran long) and keeps the remainder, so N frames take N periods. */
+#define ANIM_CATCH_UP 4u
 void cfw_anim_tick(customCfwContext *ctx) {
     if (!ctx->anim_active) return;
     if (!ctx->page_open) { cfw_anim_stop(ctx); return; }
     uint32_t now = fw_tick();
-    if (ctx->anim_last_tick && (now - ctx->anim_last_tick) < CFW_ANIM_PERIOD_MS) return;
-    ctx->anim_last_tick = now;
+    uint32_t period = ctx->anim_period_ms ? ctx->anim_period_ms : CFW_ANIM_PERIOD_MS;
+    if (!ctx->anim_last_tick) ctx->anim_last_tick = now;
+    uint32_t elapsed = now - ctx->anim_last_tick;
+    if (elapsed < period) return;
+    uint32_t steps = elapsed / period;
+    if (steps > ANIM_CATCH_UP) { steps = ANIM_CATCH_UP; ctx->anim_last_tick = now - period * ANIM_CATCH_UP; }
+    ctx->anim_last_tick += steps * period;
     int moving = 0;
     for (unsigned e = 0; e < 2; e++) {
         cfw_lens *L = &ctx->lens[e];
-        int was = cfw_anim_any(L);
-        if (!was) continue;
-        if (an_advance(L)) moving = 1;
+        if (!cfw_anim_any(L)) continue;
+        int still = 0;
+        for (uint32_t s = 0; s < steps; s++) { still = an_advance(L); if (!still) break; }
+        if (still) moving = 1;
         cfw_scene_render(ctx, L);
         if (!cfw_anim_any(L)) cfw_anim_settled(ctx, L);
     }

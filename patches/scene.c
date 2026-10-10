@@ -65,13 +65,52 @@ cfw_object *object_find(cfw_lens *L, uint32_t id) {
     return 0;
 }
 
+/* ---- journal (G2 scene.c): one ring per lens of the definitions,
+ * completions, evictions and drops the phone's mirror of that lens must
+ * learn about. Assets are shared, so an asset event lands in both rings. ---- */
+static void journal_note_lens(cfw_lens *L, uint8_t kind, uint32_t id, uint32_t version) {
+    uint32_t slot = (L->journal_head + L->journal_count) % CACHE_JOURNAL;
+    if (L->journal_count == CACHE_JOURNAL) {
+        cfw_journal_entry *old = &L->journal[L->journal_head];
+        if (old->revision > L->journal_lost_rev) L->journal_lost_rev = old->revision;
+        L->journal_head = (uint8_t)((L->journal_head + 1u) % CACHE_JOURNAL);
+        slot = (L->journal_head + L->journal_count - 1u) % CACHE_JOURNAL;
+    } else {
+        L->journal_count++;
+    }
+    cfw_journal_entry *e = &L->journal[slot];
+    e->id = id;
+    e->version = version | ((uint32_t)kind << 31);   /* bit 31 = asset; versions are < 2^31 */
+    e->revision = L->revision + 1u;                   /* recorded under the revision being built */
+    L->mutated = 1;
+}
+/* L = the lens of an object event; NULL = both lenses (an asset event). */
+static void journal_note(customCfwContext *ctx, cfw_lens *L, uint8_t kind, uint32_t id, uint32_t version) {
+    if (L) { journal_note_lens(L, kind, id, version); return; }
+    journal_note_lens(&ctx->lens[0], kind, id, version);
+    journal_note_lens(&ctx->lens[1], kind, id, version);
+}
+static cfw_lens *lens_of(customCfwContext *ctx, const cfw_object *o) {
+    return (o >= ctx->lens[1].objects && o < ctx->lens[1].objects + CACHE_OBJECTS) ? &ctx->lens[1] : &ctx->lens[0];
+}
+/* After a message: every lens with notes moves to the next revision. */
+static void journal_commit(customCfwContext *ctx) {
+    for (unsigned e = 0; e < 2; e++) {
+        cfw_lens *L = &ctx->lens[e];
+        if (L->mutated) { L->revision++; L->mutated = 0; }
+    }
+}
+
 /* ---- eviction (G2 scene.c): unreferenced assets first, then the least
  * recently used object that is neither active nor pinned ------------------- */
 static void object_free(customCfwContext *ctx, cfw_object *o) {
+    if (o->id) journal_note(ctx, lens_of(ctx, o), JOURNAL_OBJECT, o->id, 0);
     if (o->text_len) store_free(ctx, o->text_off, (uint32_t)o->text_len + 1u);
+    if (o->path_bytes) store_free(ctx, o->path_off, o->path_bytes);
     cfw_zero(o, sizeof(*o));
 }
 static void asset_free(customCfwContext *ctx, cfw_asset *a) {
+    if (a->id && (a->state & 1)) journal_note(ctx, 0, JOURNAL_ASSET, a->id, 0);
     store_free(ctx, a->offset, a->length);
     cfw_zero(a, sizeof(*a));
 }
@@ -142,6 +181,10 @@ static void lens_reset(cfw_lens *L) {
     L->bg = 0;
     for (unsigned i = 0; i < CACHE_OBJECTS; i++) cfw_zero(&L->objects[i], sizeof(L->objects[i]));
     L->active_count = 0;
+    L->revision = 0;
+    L->journal_lost_rev = 0;
+    L->journal_head = L->journal_count = 0;
+    L->mutated = 0;
 }
 
 /* RESET: the shared store and both lens scenes (a RESET targets a lens, but
@@ -154,7 +197,7 @@ void cfw_scene_reset(customCfwContext *ctx, uint8_t cap) {
     lens_reset(&ctx->lens[1]);
     store_clear(ctx);
     ctx->use_clock = 0;
-    ctx->epoch_revision++;
+    ctx->cache_ready = 1;
 }
 
 /* ---- shape record -> object ------------------------------------------------ */
@@ -196,8 +239,30 @@ static int shape_into(customCfwContext *ctx, cfw_object *o, const uint8_t *rec, 
         ctx->store[off + slen] = 0;
         o->text_off = off; o->text_len = slen;
         o->p[0] = o->x; o->p[1] = o->y; o->p[2] = o->w; o->p[3] = o->h;
+    } else if (type == SH_PATH) {
+        /* [18][flags][gray][rule][x][y][scale Q8][len][commands]: compile the
+         * commands into Q4 edges kept with the object in the store (vector.c) */
+        if (len < 12) return 0;
+        uint32_t clen = rd16(rec + 10);
+        uint16_t scale = rd16(rec + 8);
+        if (rec[3] > 1 || !clen || clen > PATH_MAX_BYTES || scale > 2048 || 12u + clen > len) return 0;
+        cfw_vector_work *w = cfw_vec_work(ctx);
+        if (!w) return -1;
+        int n = cfw_vec_compile(w, rec + 12, clen);
+        if (n < 0) { ctx->refuse_reason = REFUSE_ASSET; return 0; }
+        uint32_t bytes = (uint32_t)sizeof(cfw_path) + (uint32_t)n * (uint32_t)sizeof(cfw_edge);
+        uint32_t off = store_reserve(ctx, bytes);
+        if (off == 0xffffffffu) return -1;
+        cfw_path *path = (cfw_path *)(void *)(ctx->store + off);
+        path->count = (uint16_t)n;
+        path->rule = rec[3];
+        path->pad = 0;
+        for (int i = 0; i < n; i++) path->edges[i] = w->edges[i];
+        o->path_off = off; o->path_bytes = (uint16_t)bytes;
+        o->x = rds16(rec + 4); o->y = rds16(rec + 6);
+        o->p[0] = o->x; o->p[1] = o->y; o->p[2] = (int16_t)scale; o->p[3] = 0;
     } else {
-        return 0;               /* PATH (18) and the rest: vector.c, later */
+        return 0;
     }
     return 1;
 }
@@ -248,7 +313,10 @@ static int put_entry(customCfwContext *ctx, cfw_lens *L, const uint8_t *e, uint3
         a->last_use = ctx->use_clock;
         memcpy(ctx->store + a->offset + offset, e + 20, dl);
         if (offset + dl > a->filled) a->filled = offset + dl;
-        if (a->filled >= a->length) a->state |= 1;   /* complete */
+        if (a->filled >= a->length && !(a->state & 1)) {
+            a->state |= 1;                           /* complete: both mirrors learn of it */
+            journal_note(ctx, 0, JOURNAL_ASSET, a->id, a->version);
+        }
         return ST_APPLIED;
     }
     if (kind == PUT_OBJECT) {
@@ -260,24 +328,113 @@ static int put_entry(customCfwContext *ctx, cfw_lens *L, const uint8_t *e, uint3
         uint32_t pid = o->id ? o->id : id;
         uint8_t was_active = o->active, was_pinned = o->pinned;
         if (o->text_len) store_free(ctx, o->text_off, (uint32_t)o->text_len + 1u);
-        cfw_zero(o, sizeof(*o));
+        if (o->path_bytes) store_free(ctx, o->path_off, o->path_bytes);
+        cfw_zero(o, sizeof(*o));              /* a new version also resets its rotation */
         o->id = pid; o->version = ver;
         o->active = was_active;
-        o->pinned = was_pinned;
+        o->pinned = 1;                        /* the store reserve below must not evict it */
         o->flags = OBJ_VISIBLE;
         o->last_use = ++ctx->use_clock;
         int shaped = shape_into(ctx, o, e + 9, len - 9);
-        if (shaped <= 0) { o->id = 0; return shaped < 0 ? ST_CAPACITY : ST_REFUSED; }
+        o->pinned = was_pinned;
+        if (shaped <= 0) {
+            /* the previous version is gone with it: the mirror must learn that */
+            if (o->id && o->version != ver) journal_note(ctx, L, JOURNAL_OBJECT, o->id, 0);
+            else if (o->id) journal_note(ctx, L, JOURNAL_OBJECT, o->id, 0);
+            o->id = 0;
+            return shaped < 0 ? ST_CAPACITY : ST_REFUSED;
+        }
+        journal_note(ctx, L, JOURNAL_OBJECT, o->id, o->version);
         return ST_APPLIED;
     }
     return ST_REFUSED;
 }
 
+/* ---- STATE (mode 40) ------------------------------------------------------- */
+/* [40][epoch][revision u32][page u16]: UNCHANGED when the phone's mirror is at
+ * this lens's revision, DELTA with the journal entries after it when they fit
+ * one reply, else SNAPSHOT page `page` of every resident object and complete
+ * asset. Queries never touch recency. The reply's request word is the page. */
+static void scene_state(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint8_t *status, uint8_t *extra, uint8_t *extra_len) {
+    uint16_t epoch = rd16(msg + 1);
+    uint32_t revision = rd32(msg + 3);
+    uint16_t page = rd16(msg + 7);
+    if (epoch != 0 && epoch != ctx->stream.epoch) { *status = ST_STALE; return; }
+    if (!ctx->cache_ready) { *status = ST_RESET; return; }
+    if (page == 0 && epoch != 0) {
+        if (revision == L->revision) { *status = ST_UNCHANGED; return; }
+        if (revision < L->revision && L->journal_lost_rev <= revision) {
+            uint32_t n = 0;
+            for (uint32_t i = 0; i < L->journal_count; i++)
+                if (L->journal[(L->journal_head + i) % CACHE_JOURNAL].revision > revision) n++;
+            if (1u + 9u * n <= REPLY_EXTRA_MAX) {
+                extra[0] = (uint8_t)n;
+                uint8_t *q = extra + 1;
+                for (uint32_t i = 0; i < L->journal_count; i++) {
+                    const cfw_journal_entry *e = &L->journal[(L->journal_head + i) % CACHE_JOURNAL];
+                    if (e->revision <= revision) continue;
+                    q[0] = (uint8_t)(e->version >> 31);
+                    cfw_put32(q + 1, e->id);
+                    cfw_put32(q + 5, e->version & 0x7fffffffu);
+                    q += 9;
+                }
+                *extra_len = (uint8_t)(1u + 9u * n);
+                *status = ST_DELTA;
+                return;
+            }
+        }
+    }
+    /* snapshot page: this lens's objects by index, then complete assets */
+    uint32_t per = (REPLY_EXTRA_MAX - 5u) / 13u;
+    uint32_t total = 0, skip = (uint32_t)page * per, n = 0;
+    uint8_t *q = extra + 5;
+    for (uint32_t pass = 0; pass < 2; pass++) {
+        uint32_t limit = pass ? CACHE_ASSETS : CACHE_OBJECTS;
+        for (uint32_t i = 0; i < limit; i++) {
+            uint32_t id, version, last;
+            if (pass == 0) {
+                const cfw_object *o = &L->objects[i];
+                if (o->id == 0) continue;
+                id = o->id; version = o->version; last = o->last_use;
+            } else {
+                const cfw_asset *a = &ctx->assets[i];
+                if (a->id == 0 || !(a->state & 1)) continue;
+                id = a->id; version = a->version; last = a->last_use;
+            }
+            if (total >= skip && n < per) {
+                q[0] = (uint8_t)pass;
+                cfw_put32(q + 1, id); cfw_put32(q + 5, version); cfw_put32(q + 9, last);
+                q += 13; n++;
+            }
+            total++;
+        }
+    }
+    cfw_put16(extra, (uint16_t)total);
+    cfw_put16(extra + 2, page);
+    extra[4] = (uint8_t)n;
+    *extra_len = (uint8_t)(5u + 13u * n);
+    *status = ST_SNAPSHOT;
+}
+
 /* ---- message dispatch ------------------------------------------------------ */
+static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len,
+                               uint8_t *status, uint16_t *request, int first, uint8_t *extra, uint8_t *extra_len);
+
 /* One lens's view of a message. `first` is set for the first targeted lens of
- * a record, so shared state (store, epoch) is touched once per record. */
+ * a record, so shared state (store, epoch) is touched once per record. The
+ * journal revisions advance once the message has been applied, so the
+ * REPLY (link.c) carries the revision that includes it. */
 int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len,
                       uint8_t *status, uint16_t *request, int first, uint8_t *extra, uint8_t *extra_len) {
+    ctx->refuse_reason = 0;
+    int handled = scene_message_apply(ctx, L, msg, len, status, request, first, extra, extra_len);
+    if (handled && *status == ST_REFUSED && *extra_len == 0 && ctx->refuse_reason) { extra[0] = ctx->refuse_reason; *extra_len = 1; }
+    journal_commit(ctx);
+    return handled;
+}
+
+static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len,
+                               uint8_t *status, uint16_t *request, int first, uint8_t *extra, uint8_t *extra_len) {
     if (len < 5) return 0;
     uint8_t mode = msg[0];
     uint16_t epoch = rd16(msg + 1);
@@ -288,17 +445,47 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
     *extra_len = 0;
     ctx->evicted = 0;
 
-    if (mode == MSG_RESET) {
-        uint8_t cap = blen >= 2 ? body[1] : 0;
-        if (first) {
-            ctx->stream.epoch = epoch;
-            cfw_scene_reset(ctx, cap);
-            cfw_scene_hide(ctx, &ctx->lens[0]);
-            cfw_scene_hide(ctx, &ctx->lens[1]);
-        }
-        /* [evicted][store KiB u16]: the phone sizes its asset mirror from this */
-        extra[0] = 0; cfw_put16(extra + 1, STORE_KIB); *extra_len = 3;
+    if (mode == MSG_STATE) {
+        if (len < 9) return 0;
+        *request = rd16(msg + 7);                /* the page, echoed as the G2 does */
+        scene_state(ctx, L, msg, status, extra, extra_len);
         return 1;
+    }
+    if (mode == MSG_RESET) {
+        uint8_t sub = blen >= 1 ? body[0] : 0;
+        if (sub == CTL_RESET) {
+            uint8_t cap = blen >= 2 ? body[1] : 0;
+            if (first) {
+                ctx->stream.epoch = epoch;
+                cfw_scene_reset(ctx, cap);
+                cfw_scene_hide(ctx, &ctx->lens[0]);
+                cfw_scene_hide(ctx, &ctx->lens[1]);
+            }
+            /* [evicted][store KiB u16]: the phone sizes its asset mirror from this */
+            extra[0] = 0; cfw_put16(extra + 1, STORE_KIB); *extra_len = 3;
+            return 1;
+        }
+        if (epoch != ctx->stream.epoch) { *status = ST_STALE; return 1; }
+        if (sub == CTL_DROP) {
+            if (blen < 2) return 0;
+            uint32_t n = body[1];
+            if (blen != 2u + 4u * n) return 0;
+            for (uint32_t i = 0; i < n; i++) {
+                cfw_object *o = object_find(L, rd32(body + 2 + 4 * i));
+                if (o && o->active) { *status = ST_REFUSED; ctx->refuse_reason = REFUSE_ACTIVE; return 1; }
+            }
+            for (uint32_t i = 0; i < n; i++) {
+                cfw_object *o = object_find(L, rd32(body + 2 + 4 * i));
+                if (o) object_free(ctx, o);
+            }
+            return 1;
+        }
+        if (sub == CTL_PERIOD) {
+            if (blen != 2 || body[1] < 10 || body[1] > 250) return 0;
+            ctx->anim_period_ms = body[1];
+            return 1;
+        }
+        return 0;
     }
     if (epoch != ctx->stream.epoch) { *status = ST_STALE; return 1; }
 
@@ -310,7 +497,6 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
          * for the second lens finds the asset already stored and is a no-op */
         if (blen) { uint8_t r = (uint8_t)put_entry(ctx, L, body, blen); if (r != ST_APPLIED) *status = r; }
         if (*status == ST_APPLIED || *status == ST_CAPACITY) { extra[0] = (uint8_t)(ctx->evicted > 255u ? 255u : ctx->evicted); *extra_len = 1; }
-        if (ctx->evicted) ctx->epoch_revision++;
         return 1;
     }
     if (mode == MSG_HIDE) {
@@ -385,6 +571,18 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
             *status = ST_MISSING;
             return 1;
         }
+        /* the paths the scene would show share one edge budget per lens */
+        uint32_t edges = 0;
+        for (uint16_t i = 0; i < count; i++) {
+            const cfw_object *o = &L->objects[next[i]];
+            if (o->type == SH_PATH && o->path_bytes) edges += ((const cfw_path *)(const void *)(ctx->store + o->path_off))->count;
+        }
+        if (flags & SHOW_FLAG_KEEP)
+            for (uint32_t i = 0; i < L->active_count; i++) {
+                const cfw_object *o = &L->objects[L->active_list[i]];
+                if (o->type == SH_PATH && o->path_bytes) edges += ((const cfw_path *)(const void *)(ctx->store + o->path_off))->count;
+            }
+        if (edges > PATH_SCENE_EDGES) { *status = ST_REFUSED; ctx->refuse_reason = REFUSE_EDGES; return 1; }
         /* ops: syntax, then targets against the incoming active set */
         uint32_t ops = off;
         for (uint32_t pos = ops; pos < blen;) {
@@ -397,14 +595,16 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
             for (uint16_t i = 0; i < count; i++) L->objects[next[i]].active = 1;
         }
         for (uint32_t pos = ops; pos < blen; pos += cfw_op_len(body + pos, blen - pos)) {
-            uint8_t reason;
-            if (cfw_op_check(L, body + pos, &reason) != ST_APPLIED) {
+            uint8_t reason = 0;
+            uint8_t r = cfw_op_check(ctx, L, body + pos, &reason);
+            if (r != ST_APPLIED) {
                 /* undo the active marks: the displayed scene is unchanged */
                 if (!(flags & SHOW_FLAG_KEEP)) {
                     for (uint16_t i = 0; i < count; i++) L->objects[next[i]].active = 0;
                     for (uint32_t i = 0; i < L->active_count; i++) L->objects[L->active_list[i]].active = 1;
                 }
-                *status = ST_REFUSED;
+                *status = r;
+                ctx->refuse_reason = reason;
                 return 1;
             }
         }
@@ -436,7 +636,6 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
             L->settle_tag = *request;
             L->settle_pending = 1;
         }
-        if (ctx->evicted) ctx->epoch_revision++;
         extra[0] = (uint8_t)(ctx->evicted > 255u ? 255u : ctx->evicted); *extra_len = 1;
         cfw_scene_render(ctx, L);
         cfw_anim_arm(ctx);
@@ -561,7 +760,14 @@ void cfw_scene_render(customCfwContext *ctx, cfw_lens *L) {
         case SH_TRI: case SH_TRI_FILL: case SH_QUAD: case SH_QUAD_FILL:
         case SH_BEZIER2: case SH_BEZIER3: case SH_ARC: case SH_PIE:
             ctx->draw_gray = (uint8_t)(gray * 17u);
-            cfw_geom_draw(ctx, o->type, o->width, o->p);
+            if (cfw_vec_rotated(&o->rotation) && ctx->vector_work) cfw_vec_shape_draw(ctx, ctx->vector_work, o);
+            else cfw_geom_draw(ctx, o->type, o->width, o->p);
+            break;
+        case SH_PATH:
+            if (o->path_bytes && ctx->vector_work) {
+                ctx->draw_gray = (uint8_t)(gray * 17u);
+                cfw_vec_path_draw(ctx, ctx->vector_work, (const cfw_path *)(const void *)(ctx->store + o->path_off), o->p, &o->rotation);
+            }
             break;
         case SH_IMAGE:
             draw_image(ctx, o);

@@ -15,7 +15,14 @@ AA55 frame  (phone BLE transport)  -> payload after the business byte
       flags: bits 0-1 lens targets (0x01 left, 0x02 right, 0x03 both; revision 5 keeps a scene per lens, before only 0x01), 0x04 COMPRESSED (zlib SYNC_FLUSH, body ends 00 00 FF FF), 0x08 RESET_CONTEXT
       crc = CRC-16/CCITT-FALSE(poly 0x1021, init 0xFFFF) of the DECODED message
       messages (L2): [mode][epoch u16][request u16] body   (modes are DECIMAL 37..41, as G2CfwTransport.isCacheMessage)
-        41 RESET    [41][epoch][request][00][cap]
+        41 CONTROL  [41][epoch][request][sub]...  sub 0 RESET [cap] (adopts `epoch`), 1 DROP [n][id u32 x n] (inactive objects;
+                    an active one refuses with reason 5), 2 PERIOD [ms] (animation frame period 10..250, default 33)
+        40 STATE    [40][epoch][revision u32][page u16]  (no request field; the reply echoes the page) — the journal, revision 6:
+                    UNCHANGED when the phone's mirror of that lens is at the lens's revision; DELTA [n][(kind u8, id u32, version u32) x n]
+                    (kind 1 = asset, version 0 = gone) with the journal entries after `revision` when they fit one reply (64-entry ring
+                    per lens; assets land in both); otherwise SNAPSHOT [total u16][page u16][n][(kind, id, version, last_use u32) x n],
+                    12 entries per page (this lens's objects, then complete assets). epoch 0 asks for a snapshot; a wrong epoch is
+                    STALE; before any RESET the status is RESET (8).
         37 PUT      PUT_ASSET  [00][id u32][ver u32][kind u8][total u32][offset u32][len u16][data]
                     PUT_OBJECT [01][id u32][ver u32][shape record]
         38 SHOW     [38][epoch][request][flags][bg&0x0F][puts u8][puts entries, no length prefix][count u16][count×(id,ver)][ops]
@@ -27,7 +34,10 @@ AA55 frame  (phone BLE transport)  -> payload after the business byte
                       [3][id][dx i16][dy i16]                              MOVE
                       [4][id][dx i16][dy i16][frames u8][curve x4]         GLIDE
                       [5][id][mask u16][frames u8][curve x4][i16 per bit]  TWEEN (bits 0-7 p0..p7, 0x100 color, 0x200 width)
-                      [6][id] FREEZE   [7][id] FINISH   [9][id]... ROTATE: refused (reason 3)
+                      [6][id] FREEZE   [7][id] FINISH
+                      [9][id][angle i32 deg*256][pivot x i16][pivot y i16][ms u16][curve x4]  ROTATE (revision 6: geometry 1..13 and
+                           PATH; a ms-clocked channel independent of the geometry tween, pivot in panel pixels, ±100 turns, retarget
+                           from the elapsed angle; other types refuse with reason 3)
                     A SHOW/HIDE repeating the last applied request id is acknowledged APPLIED without re-applying.
         39 HIDE     [39][epoch][request][flags][bg]   (bit2 TAG → SETTLED [request] right away)
 ```
@@ -37,7 +47,15 @@ Shape records (coords signed px on 540×180, clipped; `width` = stroke, byte 3):
 QUAD(8) QUAD_FILL(9) BEZIER2(10) BEZIER3(11) ARC(12) PIE(13)` are 20 B
 (`[type][flags][gray][width]` + eight i16 params, the G2 shapes.h layouts,
 rasterized by `geom.c`); `IMAGE(14)` 12 B, `TEXT_CACHED(16)` 16 B,
-`TEXT_INLINE(17)` 13+len. `PATH(18)` (SVG) is not supported. Image
+`TEXT_INLINE(17)` 13+len. `PATH(18)` (revision 6, the G2 VECTOR_PROTOCOL.md):
+`[18][flags][gray][rule 0 nonzero/1 even-odd][x i16][y i16][scale Q8 u16 0..2048][len u16][commands]`,
+commands `0 M x y`, `1 L x y`, `2 Q cx cy x y`, `3 C c0x c0y c1x c1y x y`, `4 Z` in signed
+Q4 (1/16 px), every contour closed; compiled at PUT into at most 512 edges
+(8192 command bytes, 1024 commands, subdivision depth 8) kept with the object
+in the store; a SHOW whose paths exceed 2048 edges per lens refuses with reason
+6, a path that does not compile with reason 2. TWEEN on a path: bits 0 x, 1 y,
+2 scale (0..2048), 8 color (0..15). Paths are anti-aliased like the primitives
+(coverage rows, winding rule). Image
 asset = `[w u8][h u8][4bpp RLE]`; RLE tokens `[cnt<<4|c]`, `[c][cnt u8]`,
 `[c][00][cnt u16]`. `ops` are always empty on RayNeo; no warm-up SHOW/TWEEN is
 sent — the first cache message after RESET is a real PUT or SHOW.
@@ -49,7 +67,7 @@ ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/5"   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes)
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/6"   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes)
 PAGE  [13][state u8][reason u8]
 DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32]
 ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification relay, ancs.c)
@@ -88,7 +106,10 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
   frame timer runs at 33 ms (`CFW_ANIM_PERIOD_MS`); easing is a cubic bezier
   `x1 y1 x2 y2` in /255, Q15 math as on the G2.
 * REPLY `status`: 0 APPLIED, 1 STALE (epoch mismatch), 2 MISSING (unknown id/ver),
-  3 CAPACITY, 4 REFUSED.
+  3 CAPACITY, 4 REFUSED [reason: 2 path commands, 3 op target, 4 tween mask/value,
+  5 DROP of an active object, 6 edge budget], 5 UNCHANGED, 6 DELTA, 7 SNAPSHOT,
+  8 RESET (STATE only). The reply's `epoch` is the current one and `revision`
+  the lens's journal revision after the message (revision 6).
 * GESTURE `eventType`: 0 single_tap, 1 swipe_up, 2 swipe_down, 3 double_tap,
   11 tap_then_hold; `source` 0 touchpad/crown, 1 button.
 * PAGE `state` 1 open/0 closed; `reason` 0 ok, 1 launcher busy, 2 not paired (no longer sent),

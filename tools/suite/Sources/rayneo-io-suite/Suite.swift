@@ -422,6 +422,109 @@ final class Suite {
             try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
             return "6 crossings"
         },
+        Case(id: "path", group: "vector", title: "PATH: an even-odd ring filled by the firmware's compiled edges (revision 6, visible)") { s in
+            try s.requireVector()
+            s.watcher.clear()
+            let ring = s.pathCommands([(0, 80, 40), (1, 240, 40), (1, 240, 200), (1, 80, 200), (4, 0, 0),
+                                       (0, 120, 80), (1, 200, 80), (1, 200, 160), (1, 120, 160), (4, 0, 0)])
+            let put = s.putObject(id: 80, version: 1, record: s.pathRecord(rule: 1, x: 0, y: 0, scale: 256, commands: ring))
+            try s.sendMessage(s.showMessage(puts: [put], refs: [(80, 1)]), compress: false)
+            let r = try await s.cacheReply(timeout: 3)
+            guard r.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(r.summary) }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
+            return "ring applied, revision \(r.revision)"
+        },
+        Case(id: "path-open-refused", group: "vector", title: "a PATH whose contour never closes is REFUSED (reason 2)") { s in
+            try s.requireVector()
+            s.watcher.clear()
+            let open = s.pathCommands([(0, 10, 10), (1, 60, 10), (1, 60, 40)])
+            let put = s.putObject(id: 81, version: 1, record: s.pathRecord(rule: 0, x: 0, y: 0, scale: 256, commands: open))
+            try s.sendMessage(s.showMessage(puts: [put], refs: [(81, 1)]), compress: false)
+            let r = try await s.cacheReply(timeout: 3)
+            guard r.status == G2CfwTransport.CacheReply.refused, r.extra.first == 2 else { throw SuiteError.failed(r.summary) }
+            return r.summary
+        },
+        Case(id: "rotate", group: "vector", title: "ROTATE turns a rectangle a quarter turn over 600 ms, then SETTLED (visible)") { s in
+            try s.requireVector()
+            s.watcher.clear()
+            let put = s.putObject(id: 82, version: 1, record: s.rectRecord(filled: true, x: 200, y: 80, w: 120, h: 50, gray: 15))
+            try s.sendMessage(s.showMessage(puts: [put], refs: [(82, 1)], flags: 0x05, ops: [s.rotateOp(id: 82, degrees: 90, px: 260, py: 105, ms: 600)]), compress: false)
+            let r = try await s.cacheReply(timeout: 3)
+            guard r.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(r.summary) }
+            let t0 = Date()
+            _ = try await s.settled(timeout: 4)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            guard ms >= 400 else { throw SuiteError.failed("settled after \(ms) ms, expected the 600 ms turn") }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
+            return "settled after \(ms) ms"
+        },
+        Case(id: "rotate-text-refused", group: "vector", title: "ROTATE on inline text is REFUSED (reason 3)") { s in
+            try s.requireVector()
+            s.watcher.clear()
+            let put = s.putObject(id: 83, version: 1, record: s.textRecord(x: 20, y: 20, w: 200, h: 24, text: "no spin"))
+            try s.sendMessage(s.showMessage(puts: [put], refs: [(83, 1)], ops: [s.rotateOp(id: 83, degrees: 45, px: 100, py: 30, ms: 0)]), compress: false)
+            let r = try await s.cacheReply(timeout: 3)
+            guard r.status == G2CfwTransport.CacheReply.refused, r.extra.first == 3 else { throw SuiteError.failed(r.summary) }
+            return r.summary
+        },
+        Case(id: "state", group: "journal", title: "STATE: UNCHANGED at the revision, DELTA after a PUT, SNAPSHOT with epoch 0, STALE on a wrong epoch") { s in
+            try s.requireVector()
+            s.watcher.clear()
+            var m = s.header(37, epoch: s.epoch)
+            m.append(s.putObject(id: 84, version: 3, record: s.rectRecord(filled: true, x: 10, y: 10, w: 20, h: 20, gray: 8)))
+            try s.sendMessage(m, compress: false)
+            let putReply = try await s.cacheReply(timeout: 3)
+            guard putReply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed("put: \(putReply.summary)") }
+            let rev = putReply.revision
+            s.watcher.clear()
+            try s.sendMessage(s.stateMessage(epoch: s.epoch, revision: rev, page: 0), compress: false)
+            let same = try await s.cacheReply(timeout: 3)
+            guard same.status == G2CfwTransport.CacheReply.unchanged else { throw SuiteError.failed("at revision \(rev): \(same.summary)") }
+            s.watcher.clear()
+            try s.sendMessage(s.stateMessage(epoch: s.epoch, revision: rev - 1, page: 0), compress: false)
+            let delta = try await s.cacheReply(timeout: 3)
+            guard delta.status == G2CfwTransport.CacheReply.delta, delta.extra.count >= 10, delta.extra[0] >= 1 else { throw SuiteError.failed("below revision: \(delta.summary) extra \(delta.extra)") }
+            let ids = stride(from: 1, to: delta.extra.count - 8, by: 9).map { i in UInt32(delta.extra[i + 1]) | UInt32(delta.extra[i + 2]) << 8 | UInt32(delta.extra[i + 3]) << 16 | UInt32(delta.extra[i + 4]) << 24 }
+            guard ids.contains(84) else { throw SuiteError.failed("delta names \(ids), not 84") }
+            s.watcher.clear()
+            try s.sendMessage(s.stateMessage(epoch: 0, revision: 0, page: 0), compress: false)
+            let snap = try await s.cacheReply(timeout: 3)
+            guard snap.status == G2CfwTransport.CacheReply.snapshot, snap.extra.count >= 5, snap.extra[4] >= 1 else { throw SuiteError.failed("epoch 0: \(snap.summary)") }
+            s.watcher.clear()
+            try s.sendMessage(s.stateMessage(epoch: s.epoch ^ 0x5555, revision: rev, page: 0), compress: false)
+            let stale = try await s.cacheReply(timeout: 3)
+            guard stale.status == G2CfwTransport.CacheReply.stale else { throw SuiteError.failed("wrong epoch: \(stale.summary)") }
+            return "revision \(rev): unchanged, delta \(delta.extra[0]) entries, snapshot \(snap.extra[4]) entries, stale"
+        },
+        Case(id: "drop", group: "journal", title: "DROP frees an inactive object (journaled as gone) and refuses an active one (reason 5)") { s in
+            try s.requireVector()
+            s.watcher.clear()
+            var m = s.header(37, epoch: s.epoch)
+            m.append(s.putObject(id: 85, version: 1, record: s.rectRecord(filled: true, x: 10, y: 10, w: 20, h: 20, gray: 8)))
+            try s.sendMessage(m, compress: false)
+            let before = try await s.cacheReply(timeout: 3)
+            guard before.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed("put: \(before.summary)") }
+            s.watcher.clear()
+            try s.sendMessage(s.dropMessage(ids: [85]), compress: false)
+            let dropped = try await s.cacheReply(timeout: 3)
+            guard dropped.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed("drop: \(dropped.summary)") }
+            s.watcher.clear()
+            try s.sendMessage(s.stateMessage(epoch: s.epoch, revision: before.revision, page: 0), compress: false)
+            let delta = try await s.cacheReply(timeout: 3)
+            guard delta.status == G2CfwTransport.CacheReply.delta, delta.extra.count >= 10 else { throw SuiteError.failed("after drop: \(delta.summary)") }
+            let gone = stride(from: 1, to: delta.extra.count - 8, by: 9).contains { i in
+                UInt32(delta.extra[i + 1]) == 85 && delta.extra[i + 2] == 0 && delta.extra[i + 5] == 0 && delta.extra[i + 6] == 0 && delta.extra[i + 7] == 0 && delta.extra[i + 8] == 0
+            }
+            guard gone else { throw SuiteError.failed("delta does not list 85 as gone: \(delta.extra)") }
+            s.watcher.clear()
+            try s.sendMessage(s.showMessage(puts: [s.putObject(id: 86, version: 1, record: s.rectRecord(filled: true, x: 300, y: 40, w: 40, h: 40, gray: 15))], refs: [(86, 1)]), compress: false)
+            guard try await s.cacheReply(timeout: 3).status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed("show 86") }
+            s.watcher.clear()
+            try s.sendMessage(s.dropMessage(ids: [86]), compress: false)
+            let refused = try await s.cacheReply(timeout: 3)
+            guard refused.status == G2CfwTransport.CacheReply.refused, refused.extra.first == 5 else { throw SuiteError.failed("drop active: \(refused.summary)") }
+            return "85 dropped and journaled, 86 refused (active)"
+        },
         Case(id: "hide", group: "scene", title: "HIDE clears the page") { s in
             s.watcher.clear()
             try s.sendMessage(s.hideMessage(epoch: s.epoch), compress: false)
@@ -678,6 +781,58 @@ final class Suite {
         r.append(UInt8(bytes.count))
         r.append(contentsOf: bytes)
         return r
+    }
+
+    private func requireVector() throws {
+        guard let ident = watcher.lastIdent else { throw SuiteError.skipped("no IDENT") }
+        guard ident.revision >= 6 else { throw SuiteError.skipped("needs revision 6, glasses run \(ident.revision)") }
+    }
+
+    /// Path commands in Q4: (op, x, y) with 0 M, 1 L, 4 Z (coordinates in pixels).
+    private func pathCommands(_ cmds: [(UInt8, Int, Int)]) -> Data {
+        var d = Data()
+        for (op, x, y) in cmds {
+            d.append(op)
+            if op != 4 { d.append(le16(Int16(x * 16))); d.append(le16(Int16(y * 16))) }
+        }
+        return d
+    }
+
+    /// `PATH(18)`: [18][1][gray][rule][x][y][scale Q8][len][commands] (G2 VECTOR_PROTOCOL.md).
+    private func pathRecord(rule: UInt8, x: Int16, y: Int16, scale: UInt16, commands: Data, gray: UInt8 = 15) -> Data {
+        var r = Data([18, 1, gray & 0x0F, rule])
+        r.append(le16(x)); r.append(le16(y))
+        r.append(le16(Int16(bitPattern: scale)))
+        r.append(le16(Int16(commands.count)))
+        r.append(commands)
+        return r
+    }
+
+    /// `[9][id][angle deg*256 i32][pivot x][pivot y][ms u16][curve x4]`, linear easing.
+    private func rotateOp(id: UInt32, degrees: Int32, px: Int16, py: Int16, ms: UInt16) -> Data {
+        var op = Data([9])
+        op.append(le32(id))
+        op.append(le32(UInt32(bitPattern: degrees * 256)))
+        op.append(le16(px)); op.append(le16(py))
+        op.append(le16(Int16(bitPattern: ms)))
+        op.append(contentsOf: [0, 0, 255, 255])
+        return op
+    }
+
+    /// `[40][epoch][revision u32][page u16]`: no request field (the reply echoes the page).
+    private func stateMessage(epoch: UInt16, revision: UInt32, page: UInt16) -> Data {
+        var m = Data([40, UInt8(epoch & 0xFF), UInt8(epoch >> 8)])
+        m.append(le32(revision))
+        m.append(le16(Int16(bitPattern: page)))
+        return m
+    }
+
+    /// CONTROL sub 1: `[41][epoch][request][1][n][id u32 x n]`.
+    private func dropMessage(ids: [UInt32]) -> Data {
+        var m = header(41, epoch: epoch)
+        m.append(contentsOf: [1, UInt8(ids.count)])
+        for id in ids { m.append(le32(id)) }
+        return m
     }
 
     func le16(_ v: Int16) -> Data {

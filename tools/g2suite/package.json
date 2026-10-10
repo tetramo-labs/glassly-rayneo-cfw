@@ -7,7 +7,9 @@
   "scripts": {
     "suite": "bun shapes-suite.ts",
     "list": "bun shapes-suite.ts --list",
-    "dry": "G2_DRY_RUN=1 bun shapes-suite.ts"
+    "dry": "G2_DRY_RUN=1 bun shapes-suite.ts",
+    "vector": "bun vector-suite.ts",
+    "state": "bun cache-state.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

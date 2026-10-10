@@ -5,3 +5,4 @@ obj/
 patches/generated/
 __pycache__/
 *.pyc
+node_modules/

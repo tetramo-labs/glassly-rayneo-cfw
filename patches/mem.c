@@ -30,3 +30,8 @@ int memcmp(const void *a, const void *b, size_t n) {
     while (n--) { if (*ap != *bp) return (int)*ap - (int)*bp; ap++; bp++; }
     return 0;
 }
+
+/* The AEABI zeroing helpers clang substitutes for array initializers. */
+void __aeabi_memclr(void *d, size_t n) { memset(d, 0, n); }
+void __aeabi_memclr4(void *d, size_t n) { memset(d, 0, n); }
+void __aeabi_memclr8(void *d, size_t n) { memset(d, 0, n); }

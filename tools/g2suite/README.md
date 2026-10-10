@@ -18,6 +18,8 @@ bun shapes-suite.ts anim-glide      # by id
 bun shapes-suite.ts --list
 G2_DRY_RUN=1 bun shapes-suite.ts    # host pipeline only, no glasses
 G2_TRACE=1 bun shapes-suite.ts      # per-frame op counts and timings
+bun vector-suite.ts                 # SVG paths and rotation (vector-cases.ts), revision 6
+bun cache-state.ts                  # the journal: STATE, DROP, PERIOD (revision 6)
 ```
 
 Files:
@@ -28,8 +30,16 @@ Files:
 * `object-cache.ts` — the encoder, verbatim from g2flash.
 * `rayneo-transport.ts` — the G2 `cfw-transport.ts` over the bridge: the
   same record layout, ACK gate (every targeted lens acks) and `CacheLink`.
+* `vector-protocol.ts`, `vector-cases.ts` — verbatim from g2flash (the SVG
+  path compiler and the revision 38 fixtures); `vector-suite.ts` runs the
+  fixtures over the bridge (no Bad Apple playback). The probes are host
+  side: `../host/run_vector_tests.sh` rasterizes them with the firmware's own
+  vector.c and geom.c.
+* `cache-state.ts` — journal checks (not in g2flash, which only has
+  `cache-probe.ts`): STATE answers, DROP, PERIOD, the 64-entry ring overflow.
 
 Differences the verdicts know about: the RayNeo iO has no image path in
 this port (as on the G2 port), its canvas is 540×220, and revision 5 keeps
 a scene per lens exactly as the two G2 lenses do, so lens handling needs no
-change. The vector suite (SVG paths, rotation) waits for `vector.c`.
+change. The vector fixtures keep the G2's 576-wide coordinates, so a few
+reach below the 220-row panel.

@@ -14,6 +14,7 @@
 #include "rle.c"
 #include "ctx.c"
 #include "geom.c"
+#include "vector.c"
 #include "scene.c"
 #include "anim.c"
 #include "ident.c"
@@ -22,3 +23,4 @@
 #include "link.c"
 #include "ancs.c"
 #include "disp.c"
+#include "hint.c"
