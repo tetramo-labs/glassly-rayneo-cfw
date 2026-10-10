@@ -59,7 +59,10 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
 * `stream` = the **low byte of the RESET frame's 16-bit AA55 messageNumber**,
   as carried in every packet's second byte (RNLink strips the frame header
   before the business callback runs, so the phone repeats it).
-* `ordinal` = per-stream message counter (reset at RESET).
+* `ordinal` = per-stream message counter (reset at RESET). The SDK packs a
+  frame's left and right SHOWs into one stream (ordinals 0 and 1) so both
+  lenses apply them in the same handler call; each lens acks and replies to
+  the record addressed to it.
 * IDENT: `ver=4`, `w=540`, `h=180`, `maxChunk=240`, `storeKiB=64`, `revision=4`,
   `flags = 0x07` normally. Flag bits: **bit0** = zlib COMPRESSED records
   accepted (the stock inflater is used); **bit1** = raw packets accepted on
