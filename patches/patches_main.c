@@ -21,3 +21,4 @@
 #include "page.c"
 #include "link.c"
 #include "ancs.c"
+#include "disp.c"

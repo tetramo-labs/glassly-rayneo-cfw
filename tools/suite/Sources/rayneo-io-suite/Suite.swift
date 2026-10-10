@@ -170,6 +170,13 @@ final class Suite {
             }
             throw SuiteError.failed("refused, reason \(last?.reason ?? 255)")
         },
+        Case(id: "disp-probe", group: "disp", title: "DISPLAY_PROBE reports the fbdev driver geometry (revision 5)") { s in
+            guard let ident = s.watcher.lastIdent, ident.revision >= 5 else { throw SuiteError.skipped("revision 5 firmware") }
+            s.watcher.clear()
+            s.displayProbe(mode: 0)
+            let report = try await s.dispReport(timeout: 3)
+            return report.summary
+        },
         Case(id: "keepalive", group: "page", title: "KEEPALIVE renews the lease") { s in
             s.watcher.clear()
             s.control(.keepAlive)
@@ -464,6 +471,18 @@ final class Suite {
 
     private func query() {
         link.sendFrame(business: RayNeoIOBusiness.cfw, payload: RayNeoIOCfwLink.controlPacket(.query))
+    }
+
+    /// Revision 5 display probe: `[0x10][0][5][mode]`.
+    func displayProbe(mode: UInt8) {
+        link.sendFrame(business: RayNeoIOBusiness.cfw, payload: Data([0x10, 0, 5, mode]))
+    }
+
+    private func dispReport(timeout: TimeInterval) async throws -> DispReport {
+        guard await link.waitUntil(timeout: timeout, { self.watcher.unparsed.contains { $0.first == DispReport.kind } }),
+              let raw = watcher.unparsed.first(where: { $0.first == DispReport.kind }), let r = DispReport(raw)
+        else { throw SuiteError.failed("no DISP report in \(timeout) s") }
+        return r
     }
 
     private func control(_ c: RayNeoIOCfwLink.Control) {

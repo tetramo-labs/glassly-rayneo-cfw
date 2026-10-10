@@ -387,6 +387,9 @@ static void draw_text(customCfwContext *ctx, cfw_object *o) {
     void *label = fw_label_create(ctx->page_root);
     if (!label) return;
     fw_label_set_text(label, s);
+    /* the page root has no theme style (page.c), so the inherited text color
+     * is LVGL's default black: on the black canvas the text was invisible */
+    fw_obj_set_style_text_color(label, 0xffffffu, 0);
     fw_obj_set_pos(label, o->x, o->y);
     ctx->labels[ctx->label_count++] = label;
 }

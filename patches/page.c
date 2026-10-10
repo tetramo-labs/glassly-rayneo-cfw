@@ -69,6 +69,7 @@ int cfw_page_open(customCfwContext *ctx, uint8_t *reason) {
 }
 
 void cfw_page_close(customCfwContext *ctx, uint8_t reason) {
+    ctx->disp_own = 0;
     cfw_anim_stop(ctx);
     cfw_input_wheel_listen(ctx, 0);
     if (ctx->page_root) fw_obj_add_flag(ctx->page_root, LV_FLAG_HIDDEN);

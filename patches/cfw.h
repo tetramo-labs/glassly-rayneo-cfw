@@ -80,6 +80,10 @@ static inline void fw_canvas_set_buffer(void *c, void *buf, int32_t w, int32_t h
 static inline uint32_t fw_stride(uint32_t w, uint8_t cf) { return FW(uint32_t (*)(uint32_t, uint8_t), FWA_lv_draw_buf_width_to_stride)(w, cf); }
 static inline void *fw_label_create(void *parent) { return FW(void *(*)(void *), FWA_lv_label_create)(parent); }
 static inline void fw_label_set_text(void *l, const char *s) { FW(void (*)(void *, const char *), FWA_lv_label_set_text)(l, s); }
+/* lv_color_t (v9) is a 3-byte {blue, green, red} struct, passed packed in one register. */
+static inline void fw_obj_set_style_text_color(void *o, uint32_t bgr, uint32_t selector) {
+    FW(void (*)(void *, uint32_t, uint32_t), FWA_lv_obj_set_style_text_color)(o, bgr, selector);
+}
 static inline void *fw_add_event_cb(void *o, void *cb, uint32_t filter, void *user) {
     return FW(void *(*)(void *, void *, uint32_t, void *), FWA_lv_obj_add_event_cb)(o, cb, filter, user);
 }
@@ -92,6 +96,23 @@ static inline void *fw_timer_create(void *cb, uint32_t period, void *user) {
 static inline void fw_timer_delete(void *t) { FW(void (*)(void *), FWA_lv_timer_delete)(t); }
 static inline void *fw_display_default(void) { return FW(void *(*)(void), FWA_lv_display_get_default)(); }
 static inline void *fw_screen_active(void *disp) { return FW(void *(*)(void *), FWA_lv_display_get_screen_active)(disp); }
+static inline void *fw_display_driver_data(void *disp) { return FW(void *(*)(void *), FWA_lv_display_get_driver_data)(disp); }
+/* display probe (disp.c) */
+static inline int fw_ioctl(int fd, int req, void *arg) { return FW(int (*)(int, int, void *), FWA_ioctl)(fd, req, arg); }
+static inline void fw_lcdc_dual_update_full(void *left) { FW(void (*)(void *), FWA_lcdc_dual_update_full)(left); }
+/* the LCDC reads its buffers by DMA: clean the data cache after CPU writes */
+static inline void fw_lcdc_cache_sync(void *buf, uint32_t len) { FW(void (*)(void *, uint32_t), FWA_lcdc_cache_sync)(buf, len); }
+static inline int fw_lcdc_trywaitforirq_timeout(int which, int ms) { return FW(int (*)(int, int), FWA_lcdc_trywaitforirq_timeout)(which, ms); }
+static inline void fw_lcdc_update_self(void) { FW(void (*)(void), FWA_lcdc_update_self)(); }
+static inline int fw_fb_get_power(void) { return FW(int (*)(void), FWA_fb_get_power)(); }
+static inline void fw_fb_power_done(int power, int rc) { FW(void (*)(int, int), FWA_fb_power_done)(power, rc); }
+static inline void fw_lcdc_layer_update(void *src, void *area, uint32_t c, uint32_t flag, void *depth) {
+    FW(void (*)(void *, void *, uint32_t, uint32_t, void *), FWA_lcdc_layer_update)(src, area, c, flag, depth);
+}
+static inline int fw_fb_left_parallax(void) { return FW(int (*)(void), FWA_fb_left_parallax)(); }
+static inline int fw_fb_right_parallax(void) { return FW(int (*)(void), FWA_fb_right_parallax)(); }
+static inline int fw_fb_depth_mode(void) { return FW(int (*)(void), FWA_fb_depth_mode)(); }
+static inline int fw_fb_disp_mode(void) { return FW(int (*)(void), FWA_fb_disp_mode)(); }
 
 /* zlib (RFC1950 inflate). z_stream is the standard 0x38-byte 32-bit layout. */
 typedef struct {
@@ -133,8 +154,8 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 4u
-#define REV_STRING "GLASSLYCFW-IO/4"
+#define REV_MAJOR 5u
+#define REV_STRING "GLASSLYCFW-IO/5"
 #define MAX_CHUNK 240u
 #define STORE_KIB 64u
 /* IDENT flags: bit0 = zlib COMPRESSED records accepted; bit1 = raw stream packets
@@ -157,6 +178,16 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define CTRL_PAGE_OPEN  2u
 #define CTRL_PAGE_CLOSE 3u
 #define CTRL_KEEPALIVE  4u
+#define CTRL_DISPLAY_PROBE 5u   /* [0x10][stream][5][mode]: disp.c, revision 5 probe */
+/* display probe modes */
+#define DISP_REPORT       0u
+#define DISP_FB_PATTERN   1u
+#define DISP_DUAL_PATTERN 2u
+#define DISP_PASS_ON      3u
+#define DISP_PASS_OFF     4u
+#define DISP_FB_KEEP_BOUNDS 5u  /* fb pattern without the depth-bounds ioctl */
+#define DISP_OWN          6u  /* dual pattern, and the display refresh presents it (cfw_lcdc_hook) */
+#define DISP_RELEASE      7u  /* back to the stock present */
 /* record flags (L1) */
 #define REC_LENS        0x01u
 #define REC_COMPRESSED  0x04u
@@ -219,6 +250,7 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define RPL_PAGE    0x13u
 #define RPL_DIAG    0x15u          /* diagnostics, logged by the phone */
 #define RPL_ANCS    0x17u          /* ANCS relay: [seq][total u16][offset u16][json chunk] (ancs.c) */
+#define RPL_DISP    0x19u          /* display probe report (disp.c) */
 #define DIAG_SRC_RX 1u             /* sent from the RNLink RX callback */
 #define DIAG_SRC_UI 2u             /* queued from the LVGL message handler */
 /* REPLY status */
@@ -308,6 +340,8 @@ typedef struct {
 
     /* classification / session */
     uint8_t queried;               /* phone sent QUERY this connection */
+    volatile uint8_t disp_own;     /* display thread: present the module's eye buffers (disp.c) */
+    volatile uint8_t disp_dirty;   /* eye buffers need (re)composing on the display thread */
     uint8_t page_open;
     uint8_t ui_module;             /* message_processor module our UI handler owns, 0 = none */
     uint8_t pending_wakeup;
@@ -420,7 +454,11 @@ void cfw_geom_draw(customCfwContext *ctx, uint8_t type, uint8_t width, const int
 /* link.c */
 int cfw_uplink_push(customCfwContext *ctx, const uint8_t *data, uint8_t len);
 void cfw_uplink_flush(customCfwContext *ctx);
-void cfw_control(customCfwContext *ctx, uint8_t ctrl);
+void cfw_control(customCfwContext *ctx, uint8_t ctrl, uint8_t arg);
+
+/* disp.c */
+void cfw_display_probe(customCfwContext *ctx, uint8_t mode);
+void cfw_lcdc_hook(void *src, void *area, uint32_t c, uint32_t flag, void *depth);
 
 /* ---- message_processor message (verified against enqueue_message) ---------- */
 #define TIO_MSG_ID 0x54494d47u     /* 'TIMG' */

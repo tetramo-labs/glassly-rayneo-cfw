@@ -10,7 +10,7 @@ iO and for the Even Realities G2 CFW. Panel is 540×180, single display, 1-bit
 ```
 AA55 frame  (phone BLE transport)  -> payload after the business byte
   packets          [opt u8][stream u8][chunk]  (3.1)   opt: 0x01 LENS, 0x80 RESET, 0x40 END, 0x10 CONTROL
-    control        [0x10][stream][ctrl u8]    (3.2)   1 QUERY 2 PAGE_OPEN 3 PAGE_CLOSE 4 KEEPALIVE
+    control        [0x10][stream][ctrl u8][arg u8]  (3.2)   1 QUERY 2 PAGE_OPEN 3 PAGE_CLOSE 4 KEEPALIVE 5 DISPLAY_PROBE(arg = mode; revision 5 tooling)
     record stream  [flags][len u16 LE][crc u16 LE][body]   (3.3 L1)
       flags: 0x01 LENS, 0x04 COMPRESSED (zlib SYNC_FLUSH, body ends 00 00 FF FF), 0x08 RESET_CONTEXT
       crc = CRC-16/CCITT-FALSE(poly 0x1021, init 0xFFFF) of the DECODED message
@@ -49,10 +49,11 @@ ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/4"
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/5"
 PAGE  [13][state u8][reason u8]
 DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32]
 ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification relay, ancs.c)
+DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16][nplanes u8][fbmem u32][fblen u32][stride u16][display u8][bpp u8][xresV u32][yresV u32][xoff u32][yoff u32][map u32][buf2 u32][yoff2 u32][cf u8][w u32][h u32][drawStride u32][refrPass u8][leftParallax i32][rightParallax i32][depthMode i32][dispMode i32][lcdc b5 b6 b7 b8]   (display probe, disp.c; tooling only, the phone ignores it)
 ```
 
 * `stream` = the **low byte of the RESET frame's 16-bit AA55 messageNumber**,
@@ -111,7 +112,9 @@ ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification 
 Every packet is the payload of one business-0xF0 AA55 frame. A record stream
 is RESET … END with consecutive frame numbers; `stream` in every packet is the
 low byte of the RESET frame's number and comes back in ACK/NACK/REPLY. A
-control packet is a single frame `[0x10][stream][ctrl]` (`stream` ignored).
+control packet is a single frame `[0x10][stream][ctrl][arg?]` (`stream` ignored;
+`arg` only for DISPLAY_PROBE: 0 report, 1 framebuffer test pattern, 2 dual-eye
+test pattern, 3/4 stock flush pass on/off).
 The firmware receives frames through an RNLink callback table it registers for
 business 0xF0 at launcher start (see `docs/HOOKS.md`); the stock file transfer
 is not involved. Revision 1's named-file downlink no longer exists.

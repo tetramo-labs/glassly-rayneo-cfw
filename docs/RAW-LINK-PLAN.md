@@ -214,6 +214,81 @@ Design:
   clicks swallowed while the page is open rather than fed to the launcher's
   indev.
 
+Display driver, read from the stock image (2026-10-09, before the probe ran):
+
+* LVGL's display is `lv_rayneo_fbdev_create` over a NuttX framebuffer device:
+  `lv_rayneo_fbdev_set_file` opens it, reads `fb_videoinfo_s` (driver data
+  +4: fmt, xres, yres, nplanes) and `fb_planeinfo_s` (+0xc), mmaps the plane
+  (+0x28) and splits it into two LVGL draw buffers (+0x2c second buffer,
+  +0x30 its row offset). `flush_cb` (0x10690373), only on the last area of a
+  refresh, issues four ioctls on that fd: `0xfa` dirty area `{x,y,w,h}` (y in
+  virtual rows), `0x106` the 0x8c-byte depth-layer-group bounds, `0x2818`
+  FBIOPAN_DISPLAY with the planeinfo (yoffset = active buffer), `0x107`
+  commit. Driver data +0x238 is `refr_pass` (`lv_rayneo_fbdev_set_refr_pass`):
+  when set, flush_cb returns after `lv_display_flush_ready` without touching
+  the device. That is the fbguard lease, provided by the stock driver.
+* The fb driver's ioctl op (0x107566fd, cases 0xfa..0x107) hands the pan to
+  `rayneo_display_if_exec_pan_display` → `rayneo_pandisp_exec` →
+  `rayneo_lcdc_layer_update` on the display side (vsync-driven), which
+  converts the RGB565 source to 4-bit gray (`rgb565_to_g4_align_mve`, into
+  0x201e1fd0, 0x14a50 bytes = 302-byte rows × 280), clamps the per-eye column
+  offsets (`rayneo_fb_get_left/right_parallax` → state 0x1832d4f8 +0xb7/+0xb8)
+  and presents. With depth layer groups it soft-composes two eye buffers
+  (`rayneo_lcdc_depth_soft_compose_*`) and calls
+  `rayneo_lcdc_layer_dual_update_full(left)`, which pairs 0x202802c0 (left)
+  with 0x2026b840 (right): layer buffer set per eye, chip-select 1 then 2,
+  279 rows at LCDC width 0x5a (6 px units = 540 px) plus one trailing row.
+  So the panel takes two independent 4-bit surfaces: G2-style per-element
+  depth is possible by rendering both eyes ourselves and calling the dual
+  update, no LVGL involved.
+* The probe (`disp.c`, control 5, reply 0x19) reports all of the above live
+  and tries both presents: mode 1 writes a ramp + block into the mmapped
+  plane and replays flush_cb's ioctls; mode 2 fills the two eye buffers with
+  the block at different x and calls the dual update. Mode 3/4 toggle
+  refr_pass. The suite's `disp-probe` case runs mode 0.
+
+Probe results on hardware (2026-10-09, build 840fd9a1…):
+
+* Report: fb device fd 880, fmt 11 (RGB565), 544×220 virtual 544×440 (two
+  LVGL buffers of 1088-byte rows at 0x201f6a40 / 0x20231140), draw area
+  540×220, color format 0x12, left parallax −2, right 0, depth mode 0, disp
+  mode 3 (the stock update takes the per-eye path). The page's 540×180
+  canvas sits inside a 220-row panel; the G4 eye buffers are 280 rows.
+* Framebuffer path (ramp + block, replaying flush_cb's ioctls): visible and
+  stable, but a small black rectangle jittered left/right about 10 px at
+  high rate on top of it. Cause: the launcher keeps invalidating a region
+  under the page (a depth-registered widget), every stock flush recomposes
+  that rectangle with its per-eye shift, and the eyes disagree there. With
+  `refr_pass` set (probe mode 3) before the present the rectangle is gone.
+  Decision: while the page is open the module sets refr_pass and owns every
+  present; on close it clears it and invalidates the launcher screen.
+* Dual path, first tries: nothing (no cache clean: the LCDC reads by DMA,
+  `bes_lcdc_cache_sync(buf, 0x14a50)` is required after CPU writes), then a
+  partial picture that the stock refresh overwrote within a fraction of a
+  second even with refr_pass set. The display thread (`rayneo_display` →
+  `rayneo_pandisp_exec` → `rayneo_lcdc_layer_update`) re-presents from the
+  RGB565 framebuffer on its own cadence, not only on LVGL flushes, so the
+  per-eye buffers are its scratch output. Hence the LCDC hook: both
+  `bl rayneo_lcdc_layer_update` inside pandisp_exec (0x10755db2, 0x10755e68)
+  are retargeted to `cfw_lcdc_hook`, which presents the module's eye buffers
+  while `disp_own` is set and forwards to the stock otherwise. Eye buffer
+  layout (`rayneo_lcdc_visible_row_ptr`): 280 rows × 302 bytes, each row
+  16 B margin + 270 B pixels (540 px, 4 bpp) + 16 B margin, the parallax a
+  byte shift into the margins (`rayneo_lcdc_clamp_g4_xoffset`, ±16);
+  rows 0..278 go out in one transfer and row 279 separately. The panel is
+  540×280; the launcher draws 220 rows of it at a configurable y offset.
+* Presenting the pair with `rayneo_lcdc_layer_dual_update_full` drifted a
+  row per refresh (a rising bar) with the picture surviving only in the
+  bottom 60 rows, with or without the frame-done wait. The stock never
+  shows the pair that way: `rayneo_lcdc_update_self` (its re-present of the
+  current buffers) runs `dual_update_partial(NULL = the pair, {0,0,90,220},
+  state[0] = pan y offset)` when state +0xb4 (last kind) is 3 and +0xa2
+  (composed) is set, then the frame-done wait. The hook now sets those two
+  bytes and calls update_self.
+* Inline text was invisible since the theme-less page root (revision 4):
+  the label inherited LVGL's default black. Fixed by setting the label's
+  text color to white (scene.c).
+
 In order:
 
 1. Display probe build (above); then move present to the direct path, keep

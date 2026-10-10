@@ -199,7 +199,7 @@ static void stream_feed(customCfwContext *ctx, const uint8_t *p, uint32_t n) {
 }
 
 /* ---- control channel ------------------------------------------------------- */
-void cfw_control(customCfwContext *ctx, uint8_t ctrl) {
+void cfw_control(customCfwContext *ctx, uint8_t ctrl, uint8_t arg) {
     uint8_t reason;
     switch (ctrl) {
     case CTRL_QUERY:
@@ -220,6 +220,9 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl) {
             cfw_send_page_state(ctx, 1, PAGE_OK);
         }
         break;
+    case CTRL_DISPLAY_PROBE:
+        cfw_display_probe(ctx, arg);
+        break;
     default: break;
     }
 }
@@ -227,7 +230,7 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl) {
 /* ---- one stream packet (opt, stream, chunk) -------------------------------- */
 static void cfw_packet(customCfwContext *ctx, uint8_t opt, uint8_t stream, const uint8_t *chunk, uint32_t len) {
     if (opt & PKT_CONTROL) {
-        if (len >= 1) cfw_control(ctx, chunk[0]);
+        if (len >= 1) cfw_control(ctx, chunk[0], len >= 2 ? chunk[1] : 0u);
         return;
     }
     if (opt & PKT_RESET) {

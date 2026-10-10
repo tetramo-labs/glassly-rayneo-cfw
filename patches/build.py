@@ -75,6 +75,7 @@ FW_SYMBOLS = [
     ("lv_draw_buf_width_to_stride", "lv_draw_buf_width_to_stride", None),
     ("lv_label_create", "lv_label_create", None),
     ("lv_label_set_text", "lv_label_set_text", None),
+    ("lv_obj_set_style_text_color", "lv_obj_set_style_text_color", None),
     ("lv_obj_add_event_cb", "lv_obj_add_event_cb", None),
     ("lv_event_get_code", "lv_event_get_code", None),
     ("lv_event_get_key", "lv_event_get_key", None),
@@ -91,6 +92,22 @@ FW_SYMBOLS = [
      "rayneo::service::notification::NotificationMessageHandler::handleAncsNotificationReceived", 0x107029D1),
     ("rnlink_paired_status", "real_get_rnlink_paired_status", None),
     ("display_report_activity", "lv_rayneo_display_report_activity", None),
+    # revision 5 display probe (disp.c): the fbdev driver data, the fb device
+    # ioctls flush_cb issues (libc ioctl, not the fb driver's own `ioctl` op at
+    # 0x107566fd), the LCDC dual update and the parallax/depth getters.
+    ("lv_display_get_driver_data", "lv_display_get_driver_data", None),
+    ("ioctl", "ioctl", 0x108630EB),
+    ("lcdc_dual_update_full", "rayneo_lcdc_layer_dual_update_full", None),
+    ("lcdc_cache_sync", "bes_lcdc_cache_sync", None),
+    ("lcdc_layer_update", "rayneo_lcdc_layer_update", None),
+    ("lcdc_trywaitforirq_timeout", "rayneo_lcdc_trywaitforirq_timeout", None),
+    ("lcdc_update_self", "rayneo_lcdc_update_self", None),
+    ("fb_get_power", "rayneo_fb_get_power", None),
+    ("fb_power_done", "rayneo_fb_power_done", None),
+    ("fb_left_parallax", "rayneo_fb_get_left_parallax", None),
+    ("fb_right_parallax", "rayneo_fb_get_right_parallax", None),
+    ("fb_depth_mode", "rayneo_fb_get_depth_mode", None),
+    ("fb_disp_mode", "rayneo_fb_get_disp_mode", None),
     ("logger_log", "logger_log", None),
 ]
 
@@ -106,6 +123,11 @@ SHIM_STOCK = bytes.fromhex("00241f48204b84610360")
 # NotificationMessageHandler::handleMessage -> bl cfw_ancs_hook (ancs.c).
 ANCS_SITE = 0x10702E7E
 ANCS_STOCK_TARGET = 0x107029D1
+# Display present: the two `bl rayneo_lcdc_layer_update` inside rayneo_pandisp_exec
+# (the display thread's refresh step) -> bl cfw_lcdc_hook (disp.c), which owns the
+# present while the module holds a frame and forwards to the stock otherwise.
+LCDC_SITES = [0x10755DB2, 0x10755E68]
+LCDC_STOCK_TARGET = 0x10754035
 SHIM_ASSERTS = [
     (0x106D9D9C, 0x19750D2C),    # &launcher business-15 callback table
     (0x106D9DA0, 0x106D97F1),    # its stock slot-0 data callback (preserved at [0])
@@ -456,6 +478,18 @@ def build_ap(ap, src=None):
     ops.append({"offset": off(ANCS_SITE), "old": ancs_stock.hex(), "new": ancs_new.hex(),
                 "desc": "NotificationMessageHandler::handleMessage: bl handleAncsNotificationReceived -> cfw_ancs_hook (ANCS relay)"})
 
+    # 2c. Display present: retarget both layer_update calls in pandisp_exec.
+    lcdc_hooks = []
+    for site in LCDC_SITES:
+        stock = _branch_bytes(site, LCDC_STOCK_TARGET, link=True)
+        if ap[off(site):off(site) + 4] != stock:
+            raise BuildError(f"LCDC hook site {site:#x} is not `bl rayneo_lcdc_layer_update`")
+        new = _branch_bytes(site, (module_va + funcs["cfw_lcdc_hook"]) | 1, link=True)
+        ops.append({"offset": off(site), "old": stock.hex(), "new": new.hex(),
+                    "desc": f"rayneo_pandisp_exec @{site:#x}: bl rayneo_lcdc_layer_update -> cfw_lcdc_hook (display present)"})
+        lcdc_hooks.append({"site": hex(site), "len": 4, "old": stock.hex(), "new": new.hex(),
+                           "purpose": "call cfw_lcdc_hook instead of rayneo_lcdc_layer_update (forwards unless the module holds a frame)"})
+
     # 3. Relocate the build-info footer and append the module 32-byte aligned.
     pad = module_at - footer_at           # old footer bytes become zero padding
     ops.append({"offset": footer_at, "old": FOOTER.hex(), "new": ("00" * pad),
@@ -481,7 +515,8 @@ def build_ap(ap, src=None):
                    "old": SHIM_STOCK.hex(), "new": shim_new.hex(),
                    "purpose": "call cfw_register_shim from LinkMonitor::registerLinkCallback"},
                   {"site": hex(ANCS_SITE), "len": 4, "old": ancs_stock.hex(), "new": ancs_new.hex(),
-                   "purpose": "call cfw_ancs_hook instead of handleAncsNotificationReceived (tail-calls it)"}],
+                   "purpose": "call cfw_ancs_hook instead of handleAncsNotificationReceived (tail-calls it)"},
+                  *lcdc_hooks],
     }
     return patched, ops, info
 
