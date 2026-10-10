@@ -211,6 +211,24 @@ final class Suite {
             try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
             return "applied"
         },
+        Case(id: "stereo", group: "scene", title: "a SHOW per lens: the square sits at x 100 in the left eye, x 160 in the right (revision 5)") { s in
+            guard s.lensCount == 2 else { throw SuiteError.skipped("single-lens firmware") }
+            for (lens, x) in [(G2CfwTransport.lensLeft, Int16(100)), (G2CfwTransport.lensRight, Int16(160))] {
+                s.watcher.clear()
+                let rect = s.rectRecord(filled: true, x: x, y: 80, w: 60, h: 60, gray: 15)
+                let frame = s.rectRecord(filled: false, x: 20, y: 20, w: 500, h: 180, gray: 15)
+                let show = s.showMessage(puts: [s.putObject(id: 3, version: 1, record: rect), s.putObject(id: 4, version: 1, record: frame)], refs: [(3, 1), (4, 1)])
+                guard let record = s.encoder.record(show, targets: lens, allLenses: s.lenses, compress: false) else { throw SuiteError.failed("framing") }
+                s.sendStream(record)
+                guard await s.link.waitUntil(timeout: 3, { self.watcher.cacheReplies.contains { $0.lens == lens } }),
+                      let reply = s.watcher.cacheReplies.first(where: { $0.lens == lens })
+                else { throw SuiteError.failed("no REPLY from lens \(lens)") }
+                guard reply.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed("lens \(lens): \(reply.summary)") }
+                guard await s.link.waitUntil(timeout: 3, { self.watcher.acks.contains { $0.lens == lens } }) else { throw SuiteError.failed("lens \(lens): no ACK") }
+            }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
+            return "left and right applied"
+        },
         Case(id: "geometry-fill", group: "scene", title: "filled circle, triangle, quad, pie and rounded rect (visible)") { s in
             s.watcher.clear()
             let puts = [
@@ -446,17 +464,36 @@ final class Suite {
         return p
     }
 
+    /// Lens targets of the records this suite sends: both on stereo firmware
+    /// (IDENT flag 0x08, revision 5), the single left lens before.
+    private var lenses: UInt8 {
+        (watcher.lastIdent?.flags ?? 0) & 0x08 != 0 ? G2CfwTransport.lensBoth : RayNeoIOCfwLink.lens
+    }
+
+    private var lensCount: Int {
+        lenses == G2CfwTransport.lensBoth ? 2 : 1
+    }
+
+    /// Every targeted lens ACKs (or NACKs); wait for all of them so a late one
+    /// never counts for the next case. Returns the first.
     private func ack(timeout: TimeInterval) async throws -> G2CfwTransport.Ack {
-        guard await link.waitUntil(timeout: timeout, { !self.watcher.acks.isEmpty }), let a = watcher.acks.first else { throw SuiteError.failed("no ACK/NACK in \(timeout) s") }
+        let n = lensCount
+        guard await link.waitUntil(timeout: timeout, { self.watcher.acks.count >= n }), let a = watcher.acks.first
+        else { throw SuiteError.failed("no ACK/NACK from \(n) lens(es) in \(timeout) s (got \(watcher.acks.count))") }
         return a
     }
 
-    /// The firmware answers a handled message with REPLY then ACK; wait for
-    /// both so a trailing ACK never counts for the next case.
+    /// The firmware answers a handled message with REPLY then ACK per lens;
+    /// wait for all so a trailing one never counts for the next case. The
+    /// first lens's REPLY is returned; a lens that disagrees fails the case.
     private func cacheReply(timeout: TimeInterval) async throws -> G2CfwTransport.CacheReply {
-        guard await link.waitUntil(timeout: timeout, { !self.watcher.cacheReplies.isEmpty }), let r = watcher.cacheReplies.first
-        else { throw SuiteError.failed("no REPLY in \(timeout) s" + (watcher.acks.first.map { " (\($0.success ? "ACK" : "NACK") arrived)" } ?? "")) }
-        guard await link.waitUntil(timeout: timeout, { !self.watcher.acks.isEmpty }) else { throw SuiteError.failed("REPLY without ACK") }
+        let n = lensCount
+        guard await link.waitUntil(timeout: timeout, { self.watcher.cacheReplies.count >= n }), let r = watcher.cacheReplies.first
+        else { throw SuiteError.failed("no REPLY from \(n) lens(es) in \(timeout) s" + (watcher.acks.first.map { " (\($0.success ? "ACK" : "NACK") arrived)" } ?? "")) }
+        guard await link.waitUntil(timeout: timeout, { self.watcher.acks.count >= n }) else { throw SuiteError.failed("REPLY without ACK") }
+        if let other = watcher.cacheReplies.first(where: { $0.status != r.status }) {
+            throw SuiteError.failed("lenses disagree: \(r.summary) vs \(other.summary)")
+        }
         return r
     }
 
@@ -489,9 +526,10 @@ final class Suite {
         link.sendFrame(business: RayNeoIOBusiness.cfw, payload: RayNeoIOCfwLink.controlPacket(c))
     }
 
-    /// Frame one L2 message as a record (the phone's encoder) and stream it.
-    private func sendMessage(_ message: Data, compress: Bool) throws {
-        guard let record = encoder.record(message, targets: RayNeoIOCfwLink.lens, allLenses: RayNeoIOCfwLink.lens, compress: compress)
+    /// Frame one L2 message as a record (the phone's encoder) and stream it
+    /// to `targets` (default: every lens the firmware has).
+    private func sendMessage(_ message: Data, compress: Bool, targets: UInt8? = nil) throws {
+        guard let record = encoder.record(message, targets: targets ?? lenses, allLenses: lenses, compress: compress)
         else { throw SuiteError.failed("record framing failed") }
         sendStream(record)
     }

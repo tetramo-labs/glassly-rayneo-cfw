@@ -148,7 +148,7 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- panel ---------------------------------------------------------------- */
 #define CFW_W 540
-#define CFW_H 180
+#define CFW_H 220              /* the panel window the stock drives (540x280 panel, 220 rows used) */
 #define CFW_PANEL_ON 255u         /* L8 value written for an "on" pixel */
 #define CFW_GRAY_ON  8u           /* 4bpp gray >= 8 thresholds to on (1-bit panel) */
 
@@ -164,7 +164,8 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define IDENT_FLAG_ZLIB     0x01u
 #define IDENT_FLAG_RAW_0XF0 0x02u
 #define IDENT_FLAG_CONTEXT  0x04u
-#define IDENT_FLAGS         (IDENT_FLAG_ZLIB | IDENT_FLAG_RAW_0XF0)
+#define IDENT_FLAG_STEREO   0x08u  /* two lens scenes: records carry a lens mask (revision 5) */
+#define IDENT_FLAGS         (IDENT_FLAG_ZLIB | IDENT_FLAG_RAW_0XF0 | IDENT_FLAG_STEREO)
 #define RAW_MAX_BYTES 4096u        /* one frame payload: [opt][stream][chunk <= MAX_CHUNK] */
 #define CFW_STORE_BYTES (STORE_KIB * 1024u)
 
@@ -188,8 +189,12 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define DISP_FB_KEEP_BOUNDS 5u  /* fb pattern without the depth-bounds ioctl */
 #define DISP_OWN          6u  /* dual pattern, and the display refresh presents it (cfw_lcdc_hook) */
 #define DISP_RELEASE      7u  /* back to the stock present */
-/* record flags (L1) */
+/* record flags (L1): bits 0-1 are the lens targets (G2CfwTransport lensLeft/lensRight) */
 #define REC_LENS        0x01u
+#define LENS_LEFT       0x01u
+#define LENS_RIGHT      0x02u
+#define LENS_BOTH       0x03u
+#define REC_LENS_MASK   0x03u
 #define REC_COMPRESSED  0x04u
 #define REC_RESET_CTX   0x08u
 /* message modes (L2) */
@@ -238,6 +243,7 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define REFUSE_MASK   4u           /* tween mask outside the type's range */
 #define OBJ_VISIBLE   0x01u        /* cfw_object.flags */
 #define CFW_ANIM_PERIOD_MS 33u
+#define SH_TEXT        15u         /* builtin-font string asset: [15][1][gray][0][x][y][asset u32] */
 #define SH_TEXT_CACHED 16u
 #define SH_TEXT_INLINE 17u
 /* reply kinds (glasses -> phone) */
@@ -334,6 +340,23 @@ typedef struct {
 #define UPLINK_QUEUE 8u
 typedef struct { uint8_t len; uint8_t data[UPLINK_MAX]; } cfw_uplink;
 
+/* One lens scene (G2 parity: the phone keeps a left and a right mirror and
+ * sends each lens its own SHOW once any element has depth). Assets live in
+ * the shared store; objects, the active set, the background and the settle
+ * state are per lens, as is the L8 canvas the display thread composes from. */
+typedef struct {
+    uint8_t bit;                   /* LENS_LEFT / LENS_RIGHT */
+    uint8_t *canvas;               /* L8 CFW_W x CFW_H; UI thread draws, display thread converts */
+    cfw_object objects[CACHE_OBJECTS];
+    uint16_t active_list[CACHE_OBJECTS];
+    uint16_t active_count;
+    uint8_t bg;                    /* background gray of the last SHOW */
+    uint8_t last_show_valid;
+    uint8_t settle_pending;        /* a tagged SHOW has not reported SETTLED yet */
+    uint16_t settle_tag;
+    uint16_t last_show_request;    /* a repeated SHOW/HIDE request id is acknowledged, not re-applied */
+} cfw_lens;
+
 typedef struct {
     uint32_t magic;
     uint32_t ctx_size;
@@ -342,6 +365,9 @@ typedef struct {
     uint8_t queried;               /* phone sent QUERY this connection */
     volatile uint8_t disp_own;     /* display thread: present the module's eye buffers (disp.c) */
     volatile uint8_t disp_dirty;   /* eye buffers need (re)composing on the display thread */
+    volatile uint8_t disp_pattern; /* compose the probe's diagnostic images instead of the scenes */
+    volatile uint8_t disp_pan_pending; /* a present request is queued at the display thread */
+    uint32_t disp_pan_tick;
     uint8_t page_open;
     uint8_t ui_module;             /* message_processor module our UI handler owns, 0 = none */
     uint8_t pending_wakeup;
@@ -351,11 +377,9 @@ typedef struct {
     uint8_t ancs_drops;            /* notifications dropped for lack of uplink slots */
 
     /* page / LVGL (UI thread only) */
-    void *page_root;
-    void *canvas;
-    uint8_t *canvas_buf;
-    void *labels[CACHE_LABELS];
-    uint8_t label_count;
+    void *page_root;               /* black placeholder on the launcher screen (input focus) */
+    uint8_t *canvas_buf;           /* current draw target for geom.c/scene.c (a lens canvas) */
+    uint8_t draw_gray;             /* L8 value geometry writes (gray nibble x 17) */
     void *timer;
     uint32_t lease_deadline;       /* tick */
 
@@ -364,18 +388,11 @@ typedef struct {
     uint8_t *store;
     uint32_t store_used;
     cfw_asset assets[CACHE_ASSETS];
-    cfw_object objects[CACHE_OBJECTS];
-    uint16_t active_list[CACHE_OBJECTS];
-    uint16_t active_count;
+    cfw_lens lens[2];
     uint32_t epoch_revision;
     /* animation (anim.c, LVGL thread) */
     void *anim_timer;
     uint8_t anim_active;
-    uint8_t settle_pending;        /* a tagged SHOW has not reported SETTLED yet */
-    uint8_t last_show_valid;
-    uint8_t bg;                    /* background gray of the last SHOW */
-    uint16_t settle_tag;
-    uint16_t last_show_request;    /* a repeated SHOW/HIDE request id is acknowledged, not re-applied */
 
     /* uplink pacing */
     cfw_uplink uplink[UPLINK_QUEUE];
@@ -409,11 +426,6 @@ void *memmove(void *d, const void *s, size_t n);
 int memcmp(const void *a, const void *b, size_t n);
 
 /* scene.c */
-int cfw_scene_message(customCfwContext *ctx, const uint8_t *msg, uint32_t len,
-                      uint8_t *status, uint16_t *request);
-void cfw_scene_reset(customCfwContext *ctx, uint8_t cap);
-void cfw_scene_render(customCfwContext *ctx);
-void cfw_scene_hide(customCfwContext *ctx);
 
 /* page.c */
 int cfw_page_open(customCfwContext *ctx, uint8_t *reason);
@@ -435,16 +447,20 @@ void cfw_send_page_state(customCfwContext *ctx, uint8_t state, uint8_t reason);
 
 /* anim.c */
 uint32_t cfw_op_len(const uint8_t *p, uint32_t avail);
-uint8_t cfw_op_check(customCfwContext *ctx, const uint8_t *p, uint8_t *reason);
-void cfw_op_apply(customCfwContext *ctx, const uint8_t *p);
-void cfw_anim_freeze_all(customCfwContext *ctx);
-int cfw_anim_any(const customCfwContext *ctx);
+uint8_t cfw_op_check(cfw_lens *L, const uint8_t *p, uint8_t *reason);
+void cfw_op_apply(cfw_lens *L, const uint8_t *p);
+void cfw_anim_freeze_all(cfw_lens *L);
+int cfw_anim_any(const cfw_lens *L);
 void cfw_anim_arm(customCfwContext *ctx);
 void cfw_anim_stop(customCfwContext *ctx);
-void cfw_anim_settled(customCfwContext *ctx);
+void cfw_anim_settled(customCfwContext *ctx, cfw_lens *L);
 /* scene.c */
-void cfw_scene_render(customCfwContext *ctx);
-cfw_object *object_find(customCfwContext *ctx, uint32_t id);
+void cfw_scene_render(customCfwContext *ctx, cfw_lens *L);
+void cfw_scene_hide(customCfwContext *ctx, cfw_lens *L);
+void cfw_scene_reset(customCfwContext *ctx, uint8_t cap);
+int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len,
+                      uint8_t *status, uint16_t *request, int first);
+cfw_object *object_find(cfw_lens *L, uint32_t id);
 uint16_t rd16(const uint8_t *p);
 uint32_t rd32(const uint8_t *p);
 
@@ -459,6 +475,8 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl, uint8_t arg);
 /* disp.c */
 void cfw_display_probe(customCfwContext *ctx, uint8_t mode);
 void cfw_lcdc_hook(void *src, void *area, uint32_t c, uint32_t flag, void *depth);
+void cfw_disp_pass(int on);
+void cfw_page_present(customCfwContext *ctx);
 
 /* ---- message_processor message (verified against enqueue_message) ---------- */
 #define TIO_MSG_ID 0x54494d47u     /* 'TIMG' */

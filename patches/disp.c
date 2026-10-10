@@ -152,6 +152,53 @@ static int disp_dual_pattern(void) {
     return 0;
 }
 
+/* L8 lens canvases -> the LCDC pair (4 bpp, low nibble = left pixel): a lens
+ * without a canvas shows the other one's, so a failed allocation degrades to
+ * flat rather than one blind eye. */
+static void disp_compose_scene(customCfwContext *ctx) {
+    uint8_t *eye[2] = {(uint8_t *)G4_LEFT, (uint8_t *)G4_RIGHT};
+    for (unsigned e = 0; e < 2; e++) {
+        const uint8_t *src = ctx->lens[e].canvas ? ctx->lens[e].canvas : ctx->lens[e ^ 1].canvas;
+        uint8_t *buf = eye[e];
+        for (uint32_t y = 0; y < G4_ROWS; y++) {
+            uint8_t *row = buf + y * G4_STRIDE;
+            if (y >= CFW_H || !src) { cfw_zero(row, G4_STRIDE); continue; }
+            const uint8_t *s = src + y * CFW_W;
+            cfw_zero(row, G4_MARGIN);
+            uint8_t *d = row + G4_MARGIN;
+            for (uint32_t x = 0; x < CFW_W; x += 2) {
+                *d++ = (uint8_t)((s[x] >> 4) | (s[x + 1] & 0xf0));
+            }
+            cfw_zero(row + G4_MARGIN + G4_PX_BYTES, G4_STRIDE - G4_MARGIN - G4_PX_BYTES);
+        }
+    }
+    fw_lcdc_cache_sync((void *)G4_LEFT, G4_SIZE);
+    fw_lcdc_cache_sync((void *)G4_RIGHT, G4_SIZE);
+}
+
+/* UI thread: park (1) or resume (0) the stock LVGL flush. */
+void cfw_disp_pass(int on) {
+    uint8_t *d = disp_driver(0);
+    if (d) d[FBD_REFR_PASS] = on ? 1 : 0;
+}
+
+/* UI thread: ask the display thread for a present. The pan request is what
+ * flush_cb issues (minus the pixels): the display thread wakes, runs
+ * rayneo_pandisp_exec and reaches cfw_lcdc_hook, which presents our buffers.
+ * One request in flight at a time; the page timer re-arms a lost one. */
+void cfw_page_present(customCfwContext *ctx) {
+    ctx->disp_dirty = 1;
+    if (!ctx->page_open || !ctx->disp_own || ctx->disp_pan_pending) return;
+    uint8_t *d = disp_driver(0);
+    if (!d) return;
+    int fd = (int)ld32(d + FBD_FD);
+    if (fd < 0) return;
+    ctx->disp_pan_pending = 1;
+    ctx->disp_pan_tick = fw_tick();
+    (void)fw_ioctl(fd, FBIO_PAN, d + FBD_PINFO);
+    (void)fw_ioctl(fd, FBIO_COMMIT, 0);
+}
+
 /* Display thread, in place of both rayneo_lcdc_layer_update calls inside
  * rayneo_pandisp_exec (build.py LCDC_SITES). While the module holds a frame
  * the stock conversion/compose is skipped and the module's eye buffers go
@@ -162,7 +209,10 @@ void cfw_lcdc_hook(void *src, void *area, uint32_t c, uint32_t flag, void *depth
         /* compose here, on the display thread, so no stock compose can be in
          * flight on the same buffers (the LVGL-thread fill glitched the first
          * frames on hardware) */
-        if (ctx->disp_dirty) { disp_fill_dual_pattern(); ctx->disp_dirty = 0; }
+        if (ctx->disp_dirty) {
+            ctx->disp_dirty = 0;
+            if (ctx->disp_pattern) disp_fill_dual_pattern(); else disp_compose_scene(ctx);
+        }
         /* The stock never shows the pair through the full dual update (that
          * one drifted a row per frame on hardware); rayneo_lcdc_update_self
          * re-presents the current buffers the stock way: with kind 3 and the
@@ -172,6 +222,7 @@ void cfw_lcdc_hook(void *src, void *area, uint32_t c, uint32_t flag, void *depth
         lcdc[LCDC_KIND] = 3;
         lcdc[LCDC_COMPOSED] = 1;
         fw_lcdc_update_self();
+        ctx->disp_pan_pending = 0;
         return;
     }
     fw_lcdc_layer_update(src, area, c, flag, depth);
@@ -193,13 +244,15 @@ void cfw_display_probe(customCfwContext *ctx, uint8_t mode) {
         case DISP_FB_PATTERN:   rc = ctx->page_open ? disp_fb_pattern(d, 1) : -3; break;
         case DISP_FB_KEEP_BOUNDS: rc = ctx->page_open ? disp_fb_pattern(d, 0) : -3; break;
         case DISP_DUAL_PATTERN: rc = ctx->page_open ? disp_dual_pattern() : -3; break;
-        case DISP_OWN:
+        case DISP_OWN:                 /* the diagnostic images instead of the scenes */
             if (!ctx->page_open) { rc = -3; break; }
-            ctx->disp_dirty = 1;
+            ctx->disp_pattern = 1;
             ctx->disp_own = 1;
+            cfw_page_present(ctx);
             break;
-        case DISP_RELEASE:
-            ctx->disp_own = 0;
+        case DISP_RELEASE:             /* back to the scenes */
+            ctx->disp_pattern = 0;
+            cfw_page_present(ctx);
             break;
         case DISP_PASS_ON:  d[FBD_REFR_PASS] = 1; break;
         case DISP_PASS_OFF: d[FBD_REFR_PASS] = 0; break;

@@ -99,23 +99,23 @@ void cfw_uplink_flush(customCfwContext *ctx) {
 
 /* ---- reply builders -------------------------------------------------------- */
 
-static void send_ack(customCfwContext *ctx, uint8_t kind, uint16_t size, uint16_t crc) {
+static void send_ack(customCfwContext *ctx, uint8_t lens, uint8_t kind, uint16_t size, uint16_t crc) {
     uint8_t b[9];
     b[0] = kind;                       /* ACK or NACK */
     b[1] = ctx->stream.stream_id;
     cfw_put16(b + 2, ctx->stream.ordinal);
-    b[4] = REC_LENS;
+    b[4] = lens;
     cfw_put16(b + 5, size);
     cfw_put16(b + 7, crc);
     cfw_uplink_push(ctx, b, sizeof(b));
 }
 
-static void send_reply(customCfwContext *ctx, uint8_t mode, uint16_t request, uint8_t status, uint16_t epoch) {
+static void send_reply(customCfwContext *ctx, uint8_t lens, uint8_t mode, uint16_t request, uint8_t status, uint16_t epoch) {
     uint8_t b[15];
     b[0] = RPL_REPLY;
     b[1] = ctx->stream.stream_id;
     cfw_put16(b + 2, ctx->stream.ordinal);
-    b[4] = REC_LENS;
+    b[4] = lens;
     b[5] = mode;
     cfw_put16(b + 6, request);
     b[8] = status;
@@ -132,7 +132,11 @@ static void cfw_record(customCfwContext *ctx, const uint8_t *wire, uint32_t tota
     const uint8_t *body = wire + 5;
     (void)total;
 
-    if (!(flags & REC_LENS)) { ctx->last_nack = CFW_NACK_FLAGS; ctx->nack_count++; send_ack(ctx, RPL_NACK, 0, crc); ctx->stream.ordinal++; return; }
+    /* every targeted lens answers (the phone counts an ACK per lens); a NACK
+     * before dispatch goes to each of them too */
+    uint8_t targets = flags & REC_LENS_MASK;
+    if (!targets) { ctx->last_nack = CFW_NACK_FLAGS; ctx->nack_count++; send_ack(ctx, LENS_LEFT, RPL_NACK, 0, crc); ctx->stream.ordinal++; return; }
+#define NACK_ALL(size) do { for (uint8_t lb = LENS_LEFT; lb <= LENS_RIGHT; lb <<= 1) if (targets & lb) send_ack(ctx, lb, RPL_NACK, (uint16_t)(size), crc); } while (0)
     if (flags & REC_RESET_CTX) inflate_reset(ctx);
 
     uint8_t *decoded = 0;
@@ -143,7 +147,7 @@ static void cfw_record(customCfwContext *ctx, const uint8_t *wire, uint32_t tota
         if (!decoded || !inflate_record(ctx, body, len, decoded, &dlen)) {
             if (decoded) fw_free(decoded);
             ctx->last_nack = CFW_NACK_INFLATE; ctx->nack_count++;
-            send_ack(ctx, RPL_NACK, 0, crc); ctx->stream.ordinal++; return;
+            NACK_ALL(0); ctx->stream.ordinal++; return;
         }
         data = decoded;
     } else {
@@ -153,24 +157,31 @@ static void cfw_record(customCfwContext *ctx, const uint8_t *wire, uint32_t tota
     if (crc16_ccitt(data, dlen) != crc) {
         if (decoded) fw_free(decoded);
         ctx->last_nack = CFW_NACK_CRC; ctx->nack_count++;
-        send_ack(ctx, RPL_NACK, (uint16_t)dlen, crc); ctx->stream.ordinal++; return;
+        NACK_ALL(dlen); ctx->stream.ordinal++; return;
     }
 
     /* cache messages require the page to be open (spec §3.2) */
     if (!ctx->page_open) {
         if (decoded) fw_free(decoded);
-        send_ack(ctx, RPL_NACK, (uint16_t)dlen, crc); ctx->stream.ordinal++; return;
+        NACK_ALL(dlen); ctx->stream.ordinal++; return;
     }
 
-    uint8_t status = ST_APPLIED;
-    uint16_t request = 0;
-    int handled = dlen >= 5 ? cfw_scene_message(ctx, data, dlen, &status, &request) : 0;
-    if (handled) {
-        send_reply(ctx, data[0], request, status, (uint16_t)(data[1] | (data[2] << 8)));
-        send_ack(ctx, RPL_ACK, (uint16_t)dlen, crc);
-    } else {
-        send_ack(ctx, RPL_NACK, (uint16_t)dlen, crc);
+    int first = 1;
+    for (uint8_t lb = LENS_LEFT; lb <= LENS_RIGHT; lb <<= 1) {
+        if (!(targets & lb)) continue;
+        cfw_lens *L = &ctx->lens[lb == LENS_LEFT ? 0 : 1];
+        uint8_t status = ST_APPLIED;
+        uint16_t request = 0;
+        int handled = dlen >= 5 ? cfw_scene_message(ctx, L, data, dlen, &status, &request, first) : 0;
+        if (handled) {
+            send_reply(ctx, lb, data[0], request, status, (uint16_t)(data[1] | (data[2] << 8)));
+            send_ack(ctx, lb, RPL_ACK, (uint16_t)dlen, crc);
+        } else {
+            send_ack(ctx, lb, RPL_NACK, (uint16_t)dlen, crc);
+        }
+        first = 0;
     }
+#undef NACK_ALL
     if (decoded) fw_free(decoded);
     ctx->stream.ordinal++;
 }

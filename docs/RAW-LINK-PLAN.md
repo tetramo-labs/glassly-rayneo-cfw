@@ -289,13 +289,24 @@ Probe results on hardware (2026-10-09, build 840fd9a1…):
   the label inherited LVGL's default black. Fixed by setting the label's
   text color to white (scene.c).
 
+Status after the probe (2026-10-09, evening): the compose is in. Each lens
+has an L8 540×220 canvas (scene.c renders per lens; records carry a lens
+mask, replies go per lens; IDENT flag 0x08 announces it), disp.c converts
+both canvases into the LCDC pair on the display thread and presents via the
+stock self refresh, page.c parks the stock flush (refr_pass) while the page
+is open and asks for presents with the framebuffer pan ioctls. Text is the
+builtin bitmap font (tools/gen_font.py → patches/font_builtin.h, Menlo 16 px
+in a 20 px cell, the cached-font table layout with raw rows): TEXT(15),
+TEXT_INLINE(17) and the TEXT_CACHED fallback. No LVGL object draws anything;
+the page root remains for key focus. The SDK keeps element depth and sends
+per-lens SHOWs through G2CfwRenderer's mirrors on stereo firmware. Built,
+not yet flashed.
+
 In order:
 
-1. Display probe build (above); then move present to the direct path, keep
-   the LVGL screen only as an opaque black placeholder if the driver needs it.
-2. Per-eye compose with per-element depth; phone passes `depth` through.
-3. Builtin bitmap font (`TEXT(15)` and inline text) so no LVGL label is
-   needed; page.c drops its LVGL objects and styles.
+1. Display probe build: done (see above).
+2. Per-eye compose, a scene per lens, phone passes `depth` through: built.
+3. Builtin bitmap font, page.c without LVGL drawing: built.
 4. Button input via the HAL key callback; swallow while the page is open.
 5. `vector.c`: PATH records (SVG) and ROTATE ops, with the heap workspace.
 6. Object cache parity: LRU eviction + journal, MISSING id lists,

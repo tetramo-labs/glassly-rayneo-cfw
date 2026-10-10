@@ -137,10 +137,10 @@ static void an_glide(cfw_object *o, int32_t dx, int32_t dy, uint8_t frames, cons
 }
 
 /* Advance every active object one frame; 1 while any is still moving. */
-static int an_advance(customCfwContext *ctx) {
+static int an_advance(cfw_lens *L) {
     int moving = 0;
-    for (uint32_t i = 0; i < ctx->active_count; i++) {
-        cfw_object *o = &ctx->objects[ctx->active_list[i]];
+    for (uint32_t i = 0; i < L->active_count; i++) {
+        cfw_object *o = &L->objects[L->active_list[i]];
         if (o->id == 0 || o->frames == 0) continue;
         uint32_t frame = (uint32_t)o->frame + 1u;
         if (frame >= o->frames) { an_snap_end(o); continue; }
@@ -154,9 +154,9 @@ static int an_advance(customCfwContext *ctx) {
     return moving;
 }
 
-int cfw_anim_any(const customCfwContext *ctx) {
-    for (uint32_t i = 0; i < ctx->active_count; i++) {
-        const cfw_object *o = &ctx->objects[ctx->active_list[i]];
+int cfw_anim_any(const cfw_lens *L) {
+    for (uint32_t i = 0; i < L->active_count; i++) {
+        const cfw_object *o = &L->objects[L->active_list[i]];
         if (o->id != 0 && o->frames) return 1;
     }
     return 0;
@@ -196,11 +196,11 @@ uint32_t cfw_op_len(const uint8_t *p, uint32_t avail) {
 
 /* Semantic check against the incoming active set (objects marked `active`):
  * ST_APPLIED, or a REFUSED reason in *reason. */
-uint8_t cfw_op_check(customCfwContext *ctx, const uint8_t *p, uint8_t *reason) {
+uint8_t cfw_op_check(cfw_lens *L, const uint8_t *p, uint8_t *reason) {
     uint32_t id = rd32(p + 1);
     if (p[0] == OP_ROTATE) { *reason = REFUSE_TARGET; return ST_REFUSED; }
     if (id == OP_ALL_OBJECTS) return ST_APPLIED;
-    cfw_object *o = object_find(ctx, id);
+    cfw_object *o = object_find(L, id);
     if (!o || !o->active) { *reason = REFUSE_TARGET; return ST_REFUSED; }
     if (p[0] == OP_TWEEN) {
         uint32_t mask = rd16(p + 5);
@@ -242,25 +242,26 @@ static void an_apply_one(cfw_object *o, const uint8_t *p) {
     }
 }
 
-void cfw_op_apply(customCfwContext *ctx, const uint8_t *p) {
+void cfw_op_apply(cfw_lens *L, const uint8_t *p) {
     uint32_t id = rd32(p + 1);
     if (id == OP_ALL_OBJECTS) {
-        for (uint32_t i = 0; i < ctx->active_count; i++) an_apply_one(&ctx->objects[ctx->active_list[i]], p);
+        for (uint32_t i = 0; i < L->active_count; i++) an_apply_one(&L->objects[L->active_list[i]], p);
         return;
     }
-    cfw_object *o = object_find(ctx, id);
+    cfw_object *o = object_find(L, id);
     if (o) an_apply_one(o, p);
 }
 
-void cfw_anim_freeze_all(customCfwContext *ctx) {
-    for (uint32_t i = 0; i < ctx->active_count; i++) an_freeze(&ctx->objects[ctx->active_list[i]]);
+void cfw_anim_freeze_all(cfw_lens *L) {
+    for (uint32_t i = 0; i < L->active_count; i++) an_freeze(&L->objects[L->active_list[i]]);
 }
 
 /* ---- settle + timer -------------------------------------------------------- */
-void cfw_anim_settled(customCfwContext *ctx) {
-    if (!ctx->settle_pending) return;
-    ctx->settle_pending = 0;
-    uint8_t b[3] = {RPL_SETTLED, (uint8_t)ctx->settle_tag, (uint8_t)(ctx->settle_tag >> 8)};
+/* SETTLED per lens, as each G2 lens reports its own. */
+void cfw_anim_settled(customCfwContext *ctx, cfw_lens *L) {
+    if (!L->settle_pending) return;
+    L->settle_pending = 0;
+    uint8_t b[3] = {RPL_SETTLED, (uint8_t)L->settle_tag, (uint8_t)(L->settle_tag >> 8)};
     cfw_uplink_push(ctx, b, sizeof(b));
 }
 
@@ -274,27 +275,36 @@ static void an_timer_cb(void *timer) {
     customCfwContext *ctx = cfw_ctx_peek();
     if (!ctx) return;
     if (!ctx->page_open || !ctx->anim_active) { cfw_anim_stop(ctx); return; }
-    int moving = an_advance(ctx);
-    cfw_scene_render(ctx);
-    if (!moving) {
-        cfw_anim_stop(ctx);
-        cfw_anim_settled(ctx);
+    int moving = 0;
+    for (unsigned e = 0; e < 2; e++) {
+        cfw_lens *L = &ctx->lens[e];
+        int was = cfw_anim_any(L);
+        if (!was) continue;
+        if (an_advance(L)) moving = 1;
+        cfw_scene_render(ctx, L);
+        if (!cfw_anim_any(L)) cfw_anim_settled(ctx, L);
     }
+    if (!moving) cfw_anim_stop(ctx);
 }
 
-/* After a SHOW: run the frame timer while anything moves, else settle now. */
+/* After a SHOW/HIDE: run the frame timer while anything moves in either
+ * lens; a lens with nothing moving settles now. */
 void cfw_anim_arm(customCfwContext *ctx) {
-    if (!cfw_anim_any(ctx)) {
-        cfw_anim_stop(ctx);
-        cfw_anim_settled(ctx);
-        return;
+    int any = 0;
+    for (unsigned e = 0; e < 2; e++) {
+        cfw_lens *L = &ctx->lens[e];
+        if (cfw_anim_any(L)) any = 1; else cfw_anim_settled(ctx, L);
     }
+    if (!any) { cfw_anim_stop(ctx); return; }
     ctx->anim_active = 1;
     if (!ctx->anim_timer) ctx->anim_timer = fw_timer_create((void *)an_timer_cb, CFW_ANIM_PERIOD_MS, 0);
     if (!ctx->anim_timer) {           /* no timer: snap everything and settle */
-        for (uint32_t i = 0; i < ctx->active_count; i++) an_finish(&ctx->objects[ctx->active_list[i]]);
+        for (unsigned e = 0; e < 2; e++) {
+            cfw_lens *L = &ctx->lens[e];
+            for (uint32_t i = 0; i < L->active_count; i++) an_finish(&L->objects[L->active_list[i]]);
+            cfw_scene_render(ctx, L);
+            cfw_anim_settled(ctx, L);
+        }
         ctx->anim_active = 0;
-        cfw_scene_render(ctx);
-        cfw_anim_settled(ctx);
     }
 }

@@ -12,7 +12,7 @@ AA55 frame  (phone BLE transport)  -> payload after the business byte
   packets          [opt u8][stream u8][chunk]  (3.1)   opt: 0x01 LENS, 0x80 RESET, 0x40 END, 0x10 CONTROL
     control        [0x10][stream][ctrl u8][arg u8]  (3.2)   1 QUERY 2 PAGE_OPEN 3 PAGE_CLOSE 4 KEEPALIVE 5 DISPLAY_PROBE(arg = mode; revision 5 tooling)
     record stream  [flags][len u16 LE][crc u16 LE][body]   (3.3 L1)
-      flags: 0x01 LENS, 0x04 COMPRESSED (zlib SYNC_FLUSH, body ends 00 00 FF FF), 0x08 RESET_CONTEXT
+      flags: bits 0-1 lens targets (0x01 left, 0x02 right, 0x03 both; revision 5 keeps a scene per lens, before only 0x01), 0x04 COMPRESSED (zlib SYNC_FLUSH, body ends 00 00 FF FF), 0x08 RESET_CONTEXT
       crc = CRC-16/CCITT-FALSE(poly 0x1021, init 0xFFFF) of the DECODED message
       messages (L2): [mode][epoch u16][request u16] body   (modes are DECIMAL 37..41, as G2CfwTransport.isCacheMessage)
         41 RESET    [41][epoch][request][00][cap]
@@ -49,7 +49,7 @@ ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/5"
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/5"   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes)
 PAGE  [13][state u8][reason u8]
 DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32]
 ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification relay, ancs.c)

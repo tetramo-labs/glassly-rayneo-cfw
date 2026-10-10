@@ -47,7 +47,7 @@ static int32_t g_clamp(int32_t v, int32_t lo, int32_t hi) { return v < lo ? lo :
 /* ---- pixel + span (L8) ----------------------------------------------------- */
 static void g_pixel(customCfwContext *ctx, int32_t x, int32_t y) {
     if (x < 0 || y < 0 || x >= CFW_W || y >= CFW_H) return;
-    ctx->canvas_buf[(uint32_t)y * CFW_W + (uint32_t)x] = CFW_PANEL_ON;
+    ctx->canvas_buf[(uint32_t)y * CFW_W + (uint32_t)x] = ctx->draw_gray;
 }
 
 /* Inclusive [x0, x1] on row y; empty when x0 > x1. */
@@ -56,7 +56,7 @@ static void g_hspan(customCfwContext *ctx, int32_t x0, int32_t x1, int32_t y) {
     if (x0 < 0) x0 = 0;
     if (x1 >= CFW_W) x1 = CFW_W - 1;
     uint8_t *row = ctx->canvas_buf + (uint32_t)y * CFW_W;
-    for (int32_t i = x0; i <= x1; i++) row[i] = CFW_PANEL_ON;
+    for (int32_t i = x0; i <= x1; i++) row[i] = ctx->draw_gray;
 }
 
 /* ---- rectangles and circles ------------------------------------------------ */
