@@ -10,7 +10,7 @@ iO and for the Even Realities G2 CFW. Panel is 540×180, single display, 1-bit
 ```
 AA55 frame  (phone BLE transport)  -> payload after the business byte
   packets          [opt u8][stream u8][chunk]  (3.1)   opt: 0x01 LENS, 0x80 RESET, 0x40 END, 0x10 CONTROL
-    control        [0x10][stream][ctrl u8][arg u8]  (3.2)   1 QUERY 2 PAGE_OPEN 3 PAGE_CLOSE 4 KEEPALIVE 5 DISPLAY_PROBE(arg = mode; revision 5 tooling)
+    control        [0x10][stream][ctrl u8][arg u8]  (3.2)   1 QUERY 2 PAGE_OPEN 3 PAGE_CLOSE 4 KEEPALIVE 6 COMPASS(arg: bits 0-1 = 0 stop / 1 headings / 2 headings + raw records, high nibble = axis mapping, 0 = the device's own (RayNeo iO: forward +y, mirrored = 0xa0): bits 4-5 forward axis 1 x 2 y 3 z, bit 6 negate, bit 7 mirror; revision 6, compass.c) 5 DISPLAY_PROBE(arg = mode; mode 8 = screen_power_force_off, the report ends in [fb power][page open][own][dirty][pan pending][takeover][screen cb][screen on]; revision 5 tooling)
     record stream  [flags][len u16 LE][crc u16 LE][body]   (3.3 L1)
       flags: bits 0-1 lens targets (0x01 left, 0x02 right, 0x03 both; revision 5 keeps a scene per lens, before only 0x01), 0x04 COMPRESSED (zlib SYNC_FLUSH, body ends 00 00 FF FF), 0x08 RESET_CONTEXT
       crc = CRC-16/CCITT-FALSE(poly 0x1021, init 0xFFFF) of the DECODED message
@@ -47,7 +47,11 @@ Shape records (coords signed px on 540×180, clipped; `width` = stroke, byte 3):
 QUAD(8) QUAD_FILL(9) BEZIER2(10) BEZIER3(11) ARC(12) PIE(13)` are 20 B
 (`[type][flags][gray][width]` + eight i16 params, the G2 shapes.h layouts,
 rasterized by `geom.c`); `IMAGE(14)` 12 B, `TEXT_CACHED(16)` 16 B,
-`TEXT_INLINE(17)` 13+len. `PATH(18)` (revision 6, the G2 VECTOR_PROTOCOL.md):
+`TEXT_INLINE(17)` 13+len. The `[gray]` byte of IMAGE/TEXT/TEXT_CACHED/TEXT_INLINE
+records is the G2 texture options byte `[inverse 0x20][transparent 0x10][ink 0..15]`
+(revision 6): source grays scale into 0..ink, inverse reverses the ramp,
+transparent skips source 0; a colour TWEEN (bit 0x100) on these records fades
+them. `PATH(18)` (revision 6, the G2 VECTOR_PROTOCOL.md):
 `[18][flags][gray][rule 0 nonzero/1 even-odd][x i16][y i16][scale Q8 u16 0..2048][len u16][commands]`,
 commands `0 M x y`, `1 L x y`, `2 Q cx cy x y`, `3 C c0x c0y c1x c1y x y`, `4 Z` in signed
 Q4 (1/16 px), every contour closed; compiled at PUT into at most 512 edges
@@ -110,6 +114,13 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
   5 DROP of an active object, 6 edge budget], 5 UNCHANGED, 6 DELTA, 7 SNAPSHOT,
   8 RESET (STATE only). The reply's `epoch` is the current one and `revision`
   the lens's journal revision after the message (revision 6).
+* COMPASS `[1b][heading u16 LE deci-degrees][accuracy u8 0..3]` (revision 6): the
+  heading of the device's forward axis from the sensor hub's synchronized
+  IMU+magnetometer stream, tilt-compensated, hard iron removed by the midpoint
+  of the magnetometer range seen since the stream started (look around once);
+  sent when it moved >= 2° and >= 200 ms after the last one. COMPASS_RAW
+  `[1d][ax ay az][gx gy gz][mx my mz][heading u16][accuracy]` (i16 LE: accel
+  x1000, gyro x100, mag x100) every 100 ms in raw mode, for calibration.
 * GESTURE `eventType`: 0 single_tap, 1 swipe_up, 2 swipe_down, 3 double_tap,
   11 tap_then_hold; `source` 0 touchpad/crown, 1 button.
 * PAGE `state` 1 open/0 closed; `reason` 0 ok, 1 launcher busy, 2 not paired (no longer sent),

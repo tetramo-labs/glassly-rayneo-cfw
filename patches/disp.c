@@ -258,6 +258,7 @@ void cfw_display_probe(customCfwContext *ctx, uint8_t mode) {
             break;
         case DISP_PASS_ON:  d[FBD_REFR_PASS] = 1; break;
         case DISP_PASS_OFF: d[FBD_REFR_PASS] = 0; break;
+        case DISP_SCREEN_OFF: fw_screen_force_off(); break;   /* screen_power_off is refused while a wakelock is held */
         default: rc = -4; break;
         }
     }
@@ -300,5 +301,10 @@ void cfw_display_probe(customCfwContext *ctx, uint8_t mode) {
     cfw_put32(p, (uint32_t)fw_fb_disp_mode()); p += 4;
     const uint8_t *lcdc = (const uint8_t *)LCDC_STATE;
     *p++ = lcdc[0xb5]; *p++ = lcdc[0xb6]; *p++ = lcdc[0xb7]; *p++ = lcdc[0xb8];
+    /* page / wake state (revision 6): fb power, page open, own, dirty, pan pending, takeover, screen cb, screen on */
+    *p++ = (uint8_t)(fw_fb_get_power() != 0);
+    *p++ = ctx->page_open; *p++ = ctx->disp_own; *p++ = ctx->disp_dirty; *p++ = ctx->disp_pan_pending;
+    *p++ = ctx->wake_takeover; *p++ = ctx->screen_cb_registered;
+    *p++ = (uint8_t)(fw_display_is_screen_on() != 0);
     cfw_uplink_push(ctx, b, (uint8_t)(p - b));
 }

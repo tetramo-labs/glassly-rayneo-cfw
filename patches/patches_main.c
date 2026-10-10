@@ -24,3 +24,4 @@
 #include "ancs.c"
 #include "disp.c"
 #include "hint.c"
+#include "compass.c"

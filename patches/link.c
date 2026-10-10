@@ -224,6 +224,7 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl, uint8_t arg) {
         cfw_send_diag(ctx);
         break;
     case CTRL_PAGE_OPEN:
+        ctx->page_by_takeover = 0;             /* the phone's page, takeover allowed again */
         if (cfw_page_open(ctx, &reason)) cfw_send_page_state(ctx, 1, PAGE_OK);
         else cfw_send_page_state(ctx, 0, reason);
         break;
@@ -232,9 +233,13 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl, uint8_t arg) {
         break;
     case CTRL_KEEPALIVE:
         if (ctx->page_open) {
+            ctx->page_by_takeover = 0;
             ctx->lease_deadline = fw_tick() + PAGE_LEASE_MS;
             cfw_send_page_state(ctx, 1, PAGE_OK);
         }
+        break;
+    case CTRL_COMPASS:
+        cfw_compass_control(ctx, arg);
         break;
     case CTRL_DISPLAY_PROBE:
         cfw_display_probe(ctx, arg);

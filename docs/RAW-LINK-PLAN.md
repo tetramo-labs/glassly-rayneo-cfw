@@ -336,11 +336,31 @@ In order:
    i18n GetText/RegisterLabel calls of those labels are retargeted; the stock
    cycles every language while unpaired, so an English string patch would
    not have covered it). Other keys fall through to the stock lookup.
-8. Page on wake (settings_ext wake takeover) via the display screen-state
-   callbacks, if the launcher's idle gate allows an overlay there.
-8. Direct-framebuffer modes (3/6, mode-8 bundles, mode 36): natural once the
+8. Page on wake: built and verified (2026-10-10). page.c registers a display
+   manager screen-state callback; on screen-on the page timer re-presents an
+   open page. The page timer does not run while the glasses are link-idle, so
+   a lease that ran out during sleep is noticed on wake: with a retained
+   scene it is renewed in place for one more lease (no close, no flash of the
+   stock home) and the page is announced open to the phone, whose session
+   resumes keepalives or replaces the scene; a page the lease closed while
+   awake is reopened on wake the same way. One takeover per phone session
+   (a PAGE_OPEN or KEEPALIVE re-arms it), so a stale scene is never shown
+   twice. Found on the way: the stock holds a screen wakelock while a phone
+   link is up (no screen timeout then), `screen_power_force_off` changes the
+   state without blanking the panel, and `rayneo_fb_get_power` is a
+   framebuffer flag, not the panel. The probe report's tail carries the
+   page/wake flags and DISPLAY_PROBE mode 8 is the (ineffective) force-off.
+9. Direct-framebuffer modes (3/6, mode-8 bundles, mode 36): natural once the
    present path is ours; enable when the phone starts selecting them.
-9. Compass (G2 `compass.c` equivalent). The hardware has a TDK IMU plus a
+10. Compass: built (2026-10-10, compass.c; the sensor-hub stream handler,
+   integer tilt compensation, midpoint hard-iron, change-only COMPASS
+   reports, raw records for calibration, the axis mapping selectable from the
+   control byte). The device's mapping was read off the raw stream on
+   hardware (2026-10-10, worn: +x up tilted 26 degrees toward +y, +y forward,
+   +z left; the magnetometer's frame is mirrored against the IMU's) and is the
+   device default (0xa0). The hard-iron estimate is the min/max midpoint since
+   the stream started, so a session that begins near a magnet (a laptop)
+   skews it until the wearer looks around. Background: the hardware has a TDK IMU plus a
    magnetometer on the sensor-hub core, reported to the AP over rpmsg
    (`sensor_rpmsg_register_mag_data_handler` / `_sync_imu_mag_data_handler`,
    `sensor_rpmsg_start_report_mag`, `tdk_mag_data_handler`). No fused

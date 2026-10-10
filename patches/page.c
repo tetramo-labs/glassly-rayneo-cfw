@@ -51,6 +51,18 @@ void cfw_page_ensure_ui(customCfwContext *ctx) {
         L->canvas = buf;
     }
     cfw_page_ensure_timer(ctx);
+    if (!ctx->screen_cb_registered) {
+        ctx->screen_cb_registered = 1;
+        fw_screen_state_register((void *)cfw_screen_state_cb, "glassly", 0, ctx);
+    }
+}
+
+/* Display manager thread: the screen went on. Just flag it; the page timer
+ * (LVGL thread) re-presents or reopens the page. */
+void cfw_screen_state_cb(int old_state, int new_state, int reason) {
+    (void)reason;
+    customCfwContext *ctx = cfw_ctx_peek();
+    if (ctx && !old_state && new_state) ctx->wake_pending = 1;
 }
 
 /* The 25 ms service timer also drains the uplink queue, so it must exist as
@@ -86,11 +98,18 @@ int cfw_page_open(customCfwContext *ctx, uint8_t *reason) {
 }
 
 void cfw_page_close(customCfwContext *ctx, uint8_t reason) {
+    if (reason == PAGE_LEASE) cfw_compass_stop(ctx);    /* the phone is gone: no stream for nobody */
     ctx->disp_own = 0;
     ctx->disp_pattern = 0;
     cfw_anim_stop(ctx);
     cfw_input_wheel_listen(ctx, 0);
     if (ctx->page_root) fw_obj_add_flag(ctx->page_root, LV_FLAG_HIDDEN);
+    /* A lease that ran out while the glasses slept (no keepalives reach a
+     * dozing link) leaves the scene retained: the next wake reopens the page
+     * on it until the phone is back (page on wake, as the G2 takeover). A
+     * close the phone or the user asked for means it. */
+    ctx->wake_takeover = reason == PAGE_LEASE && !ctx->page_by_takeover && (ctx->lens[0].last_show_valid || ctx->lens[1].last_show_valid);
+    ctx->page_by_takeover = 0;
     for (unsigned e = 0; e < 2; e++) {
         cfw_lens *L = &ctx->lens[e];
         if (L->canvas) cfw_zero(L->canvas, (uint32_t)CFW_W * CFW_H);
@@ -104,15 +123,55 @@ void cfw_page_close(customCfwContext *ctx, uint8_t reason) {
     cfw_send_page_state(ctx, 0, reason);
 }
 
+/* Screen on: an open page is presented again (the stock's power-on sequence
+ * may have left its own frame on the panel); a page the lease closed during
+ * sleep is reopened on its retained scene and announced to the phone, whose
+ * session resumes keepalives or replaces the scene, and the lease closes it
+ * again if nobody comes. */
+static void cfw_page_wake(customCfwContext *ctx) {
+    if (ctx->page_open) {
+        ctx->disp_dirty = 1;
+        cfw_page_present(ctx);
+        return;
+    }
+    if (!ctx->wake_takeover) return;
+    ctx->wake_takeover = 0;
+    uint8_t reason;
+    if (!cfw_page_open(ctx, &reason)) return;
+    ctx->page_by_takeover = 1;
+    for (unsigned e = 0; e < 2; e++) {
+        cfw_lens *L = &ctx->lens[e];
+        if (L->last_show_valid) cfw_scene_render(ctx, L);
+    }
+    cfw_send_page_state(ctx, 1, PAGE_OK);
+}
+
+/* The page timer does not run while the glasses are link-idle, so a lease
+ * that ran out during sleep is only noticed on wake: that is the takeover
+ * case too, kept in place (no close, no flash of the stock home) for one
+ * more lease, once per phone session. */
+#define LEASE_SLEPT_MS 5000u
+
 void cfw_page_tick(customCfwContext *ctx) {
+    if (ctx->wake_pending) { ctx->wake_pending = 0; cfw_page_wake(ctx); }
+    cfw_compass_tick(ctx);
     cfw_uplink_flush(ctx);
     if (!ctx->page_open) return;
     cfw_input_poll(ctx);
     cfw_anim_tick(ctx);
     uint32_t now = fw_tick();
     if ((int32_t)(now - ctx->lease_deadline) >= 0) {
-        cfw_page_close(ctx, PAGE_LEASE);
-        return;
+        int scene = ctx->lens[0].last_show_valid || ctx->lens[1].last_show_valid;
+        if (now - ctx->lease_deadline > LEASE_SLEPT_MS && scene && !ctx->page_by_takeover) {
+            ctx->page_by_takeover = 1;
+            ctx->lease_deadline = now + PAGE_LEASE_MS;
+            ctx->disp_dirty = 1;
+            cfw_page_present(ctx);
+            cfw_send_page_state(ctx, 1, PAGE_OK);
+        } else {
+            cfw_page_close(ctx, PAGE_LEASE);
+            return;
+        }
     }
     if (ctx->press_start_tick && (now - ctx->press_start_tick) >= LONG_CLOSE_MS) {
         ctx->press_start_tick = 0;
@@ -121,5 +180,8 @@ void cfw_page_tick(customCfwContext *ctx) {
     /* a present request the display thread never served (screen off) must
      * not block the next one forever */
     if (ctx->disp_pan_pending && (now - ctx->disp_pan_tick) > 1000u) ctx->disp_pan_pending = 0;
+    /* a frame composed while the panel was off (screen timeout, wake) is
+     * presented once the panel reports power again */
+    if (ctx->page_open && ctx->disp_own && ctx->disp_dirty && !ctx->disp_pan_pending && fw_fb_get_power()) cfw_page_present(ctx);
     if (ctx->disp_dirty && !ctx->disp_pan_pending) cfw_page_present(ctx);
 }

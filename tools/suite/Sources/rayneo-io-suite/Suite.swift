@@ -525,6 +525,33 @@ final class Suite {
             guard refused.status == G2CfwTransport.CacheReply.refused, refused.extra.first == 5 else { throw SuiteError.failed("drop active: \(refused.summary)") }
             return "85 dropped and journaled, 86 refused (active)"
         },
+        Case(id: "image-options", group: "vector", title: "IMAGE asset drawn through the texture options: ink 15 transparent, ink 8 opaque, inverse; then a colour tween fades it (revision 6, visible)") { s in
+            try s.requireVector()
+            s.watcher.clear()
+            // 32x24: left half gray 15, right half gray 0 (the transparent half)
+            var pixels: [UInt8] = []
+            for _ in 0 ..< 24 { pixels.append(contentsOf: [UInt8](repeating: 15, count: 16)); pixels.append(contentsOf: [UInt8](repeating: 0, count: 16)) }
+            let image = s.rleImage(pixels, width: 32, height: 24)
+            var put = s.header(37, epoch: s.epoch)
+            put.append(s.putAsset(id: 90, version: 1, kind: 0, data: image))
+            try s.sendMessage(put, compress: false)
+            let a = try await s.cacheReply(timeout: 3)
+            guard a.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed("asset: \(a.summary)") }
+            s.watcher.clear()
+            let puts = [
+                s.putObject(id: 91, version: 1, record: s.imageRecord(options: 0x1F, x: 40, y: 120, asset: 90)),
+                s.putObject(id: 92, version: 1, record: s.imageRecord(options: 0x08, x: 120, y: 120, asset: 90)),
+                s.putObject(id: 93, version: 1, record: s.imageRecord(options: 0x2F, x: 200, y: 120, asset: 90)),
+            ]
+            // fade the first copy: colour byte 0x1F -> 0x10 over 20 frames, tagged
+            var tween = Data([5]); tween.append(s.le32(91)); tween.append(s.le16(0x100)); tween.append(20); tween.append(contentsOf: [0, 0, 255, 255]); tween.append(s.le16(0x10))
+            try s.sendMessage(s.showMessage(puts: puts, refs: [(91, 1), (92, 1), (93, 1)], flags: 0x05, ops: [tween]), compress: false)
+            let r = try await s.cacheReply(timeout: 3)
+            guard r.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(r.summary) }
+            _ = try await s.settled(timeout: 4)
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
+            return "three draws applied, fade settled"
+        },
         Case(id: "hide", group: "scene", title: "HIDE clears the page") { s in
             s.watcher.clear()
             try s.sendMessage(s.hideMessage(epoch: s.epoch), compress: false)
@@ -774,7 +801,7 @@ final class Suite {
     /// `TEXT_INLINE(17)`: 13 + len bytes, x y w h at [4], length at [12].
     private func textRecord(x: Int16, y: Int16, w: Int16, h: Int16, text: String) -> Data {
         let bytes = Array(text.utf8.prefix(64))
-        var r = Data([17, 0, 0x0F, 0])
+        var r = Data([17, 0, 0x1F, 0])   // options: ink 15, transparent (the phone's builtin text options)
         for v in [x, y, w, h] {
             r.append(le16(v))
         }
@@ -833,6 +860,39 @@ final class Suite {
         m.append(contentsOf: [1, UInt8(ids.count)])
         for id in ids { m.append(le32(id)) }
         return m
+    }
+
+    /// `PUT_ASSET`: `[00][id][ver][kind][total u32][offset u32][len u16][data]`, one chunk.
+    private func putAsset(id: UInt32, version: UInt32, kind: UInt8, data: Data) -> Data {
+        var e = Data([0x00])
+        e.append(le32(id)); e.append(le32(version)); e.append(kind)
+        e.append(le32(UInt32(data.count))); e.append(le32(0))
+        e.append(le16(Int16(data.count)))
+        e.append(data)
+        return e
+    }
+
+    /// `IMAGE(14)`: `[14][1][options][0][x][y][asset u32]`; options = [inverse 0x20][transparent 0x10][ink].
+    private func imageRecord(options: UInt8, x: Int16, y: Int16, asset: UInt32) -> Data {
+        var r = Data([14, 1, options, 0])
+        r.append(le16(x)); r.append(le16(y)); r.append(le32(asset))
+        return r
+    }
+
+    /// `[w][h][4bpp RLE]`: runs `(n<<4)|c` for n <= 15, `[c][n]` for n <= 255, `[c][0][n u16]` beyond.
+    private func rleImage(_ gray: [UInt8], width: Int, height: Int) -> Data {
+        var out = Data([UInt8(width), UInt8(height)])
+        var i = 0
+        while i < gray.count {
+            let c = gray[i] & 15
+            var n = 1
+            while i + n < gray.count, gray[i + n] & 15 == c, n < 65535 { n += 1 }
+            if n <= 15 { out.append(UInt8(n << 4) | c) }
+            else if n <= 255 { out.append(c); out.append(UInt8(n)) }
+            else { out.append(c); out.append(0); out.append(UInt8(n & 0xFF)); out.append(UInt8(n >> 8)) }
+            i += n
+        }
+        return out
     }
 
     func le16(_ v: Int16) -> Data {

@@ -89,6 +89,12 @@ FW_SYMBOLS = [
     ("input_register_wheel", "rayneo::service::launcher::InputEventMonitor::registerRawWheelListener", None),
     ("input_unregister_wheel", "rayneo::service::launcher::InputEventMonitor::unregisterRawWheelListener", None),
     ("btn_register", "rayneo_register_btn_event_interceptor", None),
+    ("display_reg_screen_cb", "rayneo_dispay_register_screen_state_callback", None),   # sic
+    ("screen_power_force_off", "screen_power_force_off", None),   # ignores wakelocks (the phone link holds one)
+    ("sensor_register_sync_imu_mag", "sensor_rpmsg_register_sync_imu_mag_data_handler", None),
+    ("sensor_start_sync_imu_mag", "sensor_rpmsg_start_report_sync_imu_mag", None),
+    ("sensor_stop_sync_imu_mag", "sensor_rpmsg_stop_report_sync_imu_mag", None),
+    ("display_is_screen_on", "rayneo_display_is_screen_on", None),
     ("i18n_get_text", "rayneo::manager::I18nManager::GetText", 0x107D9FF1),   # (this, key) overload
     ("i18n_text_for_language", "rayneo::manager::I18nManager::GetTextForLanguage", None),
     ("ancs_notification_handler",

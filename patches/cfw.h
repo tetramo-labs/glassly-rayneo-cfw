@@ -95,6 +95,19 @@ static inline void *fw_add_event_cb(void *o, void *cb, uint32_t filter, void *us
 static inline uint32_t fw_event_code(void *e) { return FW(uint32_t (*)(void *), FWA_lv_event_get_code)(e); }
 static inline uint32_t fw_event_key(void *e) { return FW(uint32_t (*)(void *), FWA_lv_event_get_key)(e); }
 static inline void *fw_event_user(void *e) { return FW(void *(*)(void *), FWA_lv_event_get_user_data)(e); }
+/* Display manager screen-state callbacks: cb(old_state, new_state, reason)
+ * from the power controller's thread; state nonzero = on, reason 0
+ * SCREEN_TIMEOUT, 1 USER_REQ, 2 SYSTEM_EVENT (rayneo_display_manager). */
+static inline void fw_screen_force_off(void) { FW(void (*)(void), FWA_screen_power_force_off)(); }
+static inline int fw_display_is_screen_on(void) { return FW(int (*)(void), FWA_display_is_screen_on)(); }
+/* Sensor hub (sensor_rpmsg): the synchronized IMU+magnetometer stream, one
+ * handler slot; start/stop block briefly for the BTH core's ack. */
+static inline void fw_sensor_register_sync_imu_mag(void *cb) { FW(void (*)(void *), FWA_sensor_register_sync_imu_mag)(cb); }
+static inline int fw_sensor_start_sync_imu_mag(void) { return FW(int (*)(void), FWA_sensor_start_sync_imu_mag)(); }
+static inline int fw_sensor_stop_sync_imu_mag(void) { return FW(int (*)(void), FWA_sensor_stop_sync_imu_mag)(); }
+static inline int fw_screen_state_register(void *cb, const char *name, int priority, void *user) {
+    return FW(int (*)(void *, const char *, int, void *), FWA_display_reg_screen_cb)(cb, name, priority, user);
+}
 static inline void *fw_timer_create(void *cb, uint32_t period, void *user) {
     return FW(void *(*)(void *, uint32_t, void *), FWA_lv_timer_create)(cb, period, user);
 }
@@ -186,6 +199,7 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define CTRL_PAGE_CLOSE 3u
 #define CTRL_KEEPALIVE  4u
 #define CTRL_DISPLAY_PROBE 5u   /* [0x10][stream][5][mode]: disp.c, revision 5 probe */
+#define CTRL_COMPASS    6u      /* [0x10][stream][6][arg]: compass.c (bits 0-1 mode, 4-5 forward axis, 6 negate, 7 mirror) */
 /* display probe modes */
 #define DISP_REPORT       0u
 #define DISP_FB_PATTERN   1u
@@ -195,6 +209,7 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define DISP_FB_KEEP_BOUNDS 5u  /* fb pattern without the depth-bounds ioctl */
 #define DISP_OWN          6u  /* dual pattern, and the display refresh presents it (cfw_lcdc_hook) */
 #define DISP_RELEASE      7u  /* back to the stock present */
+#define DISP_SCREEN_OFF   8u  /* force the screen off past the wakelocks (wake tests: the button turns it on again) */
 /* record flags (L1): bits 0-1 are the lens targets (G2CfwTransport lensLeft/lensRight) */
 #define REC_LENS        0x01u
 #define LENS_LEFT       0x01u
@@ -298,6 +313,8 @@ typedef struct {
 #define RPL_DIAG    0x15u          /* diagnostics, logged by the phone */
 #define RPL_ANCS    0x17u          /* ANCS relay: [seq][total u16][offset u16][json chunk] (ancs.c) */
 #define RPL_DISP    0x19u          /* display probe report (disp.c) */
+#define RPL_COMPASS 0x1bu          /* [heading u16 deci-degrees][accuracy u8] on change (compass.c) */
+#define RPL_COMPASS_RAW 0x1du      /* [ax ay az gx gy gz mx my mz i16][heading u16][accuracy] (raw mode) */
 #define DIAG_SRC_RX 1u             /* sent from the RNLink RX callback */
 #define DIAG_SRC_UI 2u             /* queued from the LVGL message handler */
 /* REPLY status */
@@ -456,6 +473,10 @@ typedef struct {
     volatile uint8_t disp_pan_pending; /* a present request is queued at the display thread */
     uint32_t disp_pan_tick;
     uint8_t page_open;
+    uint8_t screen_cb_registered; /* page.c: the display manager's screen-state callback is ours too */
+    volatile uint8_t wake_pending; /* screen went on (callback thread); the page timer acts on it */
+    uint8_t wake_takeover;         /* the lease closed a page that had a scene: reopen it on wake */
+    uint8_t page_by_takeover;      /* the open page is a wake takeover, not the phone's: no second takeover */
     uint8_t ui_module;             /* message_processor module our UI handler owns, 0 = none */
     uint8_t pending_wakeup;
     int8_t ui_reg_rc;              /* last message_processor_register_c_handler result (DIAG) */
@@ -500,6 +521,21 @@ typedef struct {
     int32_t crown_accum;
     uint32_t press_start_tick;
 
+    /* compass (compass.c): the sensor thread writes, the page timer reads */
+    uint8_t compass_mode;          /* 0 off, 1 headings, 2 headings + raw */
+    uint8_t compass_axes;          /* control byte bits 4-7: forward axis, negate, mirror */
+    uint8_t compass_started;
+    uint8_t compass_span_valid;
+    int8_t compass_rc;             /* last start result (diagnostics) */
+    volatile uint16_t compass_heading;   /* deci-degrees */
+    volatile uint8_t compass_accuracy;
+    volatile uint32_t compass_seq;
+    uint32_t compass_sent_seq;
+    uint16_t compass_last_heading;
+    uint32_t compass_sent_tick, compass_raw_tick;
+    int32_t compass_min[3], compass_max[3];
+    int32_t compass_avg_m[3], compass_avg_a[3];
+    volatile int16_t compass_raw[9];
     /* diagnostics */
     uint16_t nack_count;
     uint8_t last_nack;
@@ -531,6 +567,7 @@ void cfw_page_close(customCfwContext *ctx, uint8_t reason);
 void cfw_page_ensure_ui(customCfwContext *ctx);
 void cfw_page_ensure_timer(customCfwContext *ctx);
 void cfw_page_tick(customCfwContext *ctx);
+void cfw_screen_state_cb(int old_state, int new_state, int reason);
 
 /* input.c */
 void cfw_input_wheel_listen(customCfwContext *ctx, int on);
@@ -590,6 +627,11 @@ static inline const char *fw_i18n_get_text(void *i18n, const char *key) {
 static inline const char *fw_i18n_text_for_language(void *i18n, const char *lang, const char *key) {
     return FW(const char *(*)(void *, const char *, const char *), FWA_i18n_text_for_language)(i18n, lang, key);
 }
+/* compass.c */
+void cfw_compass_control(customCfwContext *ctx, uint8_t arg);
+void cfw_compass_stop(customCfwContext *ctx);
+void cfw_compass_tick(customCfwContext *ctx);
+
 /* hint.c */
 const char *cfw_disconnect_hint(void *i18n, const char *key);
 void cfw_hint_unregistered(void *i18n, void *label, const char *key);

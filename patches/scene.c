@@ -650,17 +650,31 @@ static void px_gray(customCfwContext *ctx, int x, int y, uint8_t v) {
     ctx->canvas_buf[(uint32_t)y * CFW_W + (uint32_t)x] = v;
 }
 
-/* Blit raw 4bpp rows (rowbytes per row, low nibble = left pixel), scaled by
- * `gray` (0..15): a nibble of 0 is transparent, the rest write gray*nibble/15. */
+/* Texture draw options (the G2 texture_cache.c): the record's color byte is
+ * [inverse 0x20][transparent 0x10][ink 0..15]. The 4-bit LUT scales the
+ * 0..15 source range into 0..ink (15 = identity), inverse reverses the
+ * completed ramp; transparency tests the source value before the LUT, so
+ * source 0 is skipped even for an inverse ramp. A color tween on an image or
+ * text therefore fades it. */
+#define TEX_OPT_TRANSPARENT 0x10u
+#define TEX_OPT_INVERSE     0x20u
+static void make_lut(uint8_t options, uint8_t *lut) {
+    uint32_t top = options & 0x0fu;
+    for (uint32_t i = 0; i < 16u; i++) {
+        uint32_t source = (options & TEX_OPT_INVERSE) ? 15u - i : i;
+        lut[i] = (uint8_t)((source * top) / 15u);
+    }
+}
+
+/* Blit raw 4bpp rows (rowbytes per row, low nibble = left pixel) through the LUT. */
 static void blit_rows(customCfwContext *ctx, const uint8_t *rows, uint32_t iw, uint32_t ih, uint32_t rowbytes,
-                      int x, int y, uint8_t gray) {
+                      int x, int y, const uint8_t *lut, int transparent) {
     for (uint32_t j = 0; j < ih; j++) {
         for (uint32_t i = 0; i < iw; i++) {
             uint8_t b = rows[j * rowbytes + (i >> 1)];
             uint8_t g = (i & 1) ? (b >> 4) : (b & 0x0f);
-            if (!g) continue;
-            uint32_t v = ((uint32_t)g * gray + 7u) / 15u;
-            px_gray(ctx, x + (int)i, y + (int)j, (uint8_t)(v * 17u));
+            if (transparent && !g) continue;
+            px_gray(ctx, x + (int)i, y + (int)j, (uint8_t)(lut[g] * 17u));
         }
     }
 }
@@ -668,7 +682,7 @@ static void blit_rows(customCfwContext *ctx, const uint8_t *rows, uint32_t iw, u
 /* Blit one cached image `[w u8][h u8][4bpp RLE]` (len bytes) at (x, y):
  * decoded into a scratch region at the store tail (not persisted). Returns
  * the image width, 0 when it did not decode. */
-static uint32_t blit_image(customCfwContext *ctx, const uint8_t *img, uint32_t len, int x, int y, uint8_t gray) {
+static uint32_t blit_image(customCfwContext *ctx, const uint8_t *img, uint32_t len, int x, int y, const uint8_t *lut, int transparent) {
     if (len < 2) return 0;
     uint32_t iw = img[0], ih = img[1];
     if (!iw || !ih) return 0;
@@ -682,7 +696,7 @@ static uint32_t blit_image(customCfwContext *ctx, const uint8_t *img, uint32_t l
     rle_init(&rs, dst, rowbytes, rowbytes, ih);
     rle_feed(&rs, img + 2, len - 2);
     uint32_t out = 0;
-    if (!rs.err) { blit_rows(ctx, dst, iw, ih, rowbytes, x, y, gray); out = iw; }
+    if (!rs.err) { blit_rows(ctx, dst, iw, ih, rowbytes, x, y, lut, transparent); out = iw; }
     store_free(ctx, scratch, need);
     return out;
 }
@@ -690,7 +704,9 @@ static uint32_t blit_image(customCfwContext *ctx, const uint8_t *img, uint32_t l
 static void draw_image(customCfwContext *ctx, cfw_object *o) {
     cfw_asset *a = asset_find(ctx, o->asset_id);
     if (!a || !(a->state & 1) || a->length < 2) return;
-    blit_image(ctx, ctx->store + a->offset, a->length, o->p[0], o->p[1], 15);
+    uint8_t lut[16];
+    make_lut(o->color, lut);
+    blit_image(ctx, ctx->store + a->offset, a->length, o->p[0], o->p[1], lut, (o->color & TEX_OPT_TRANSPARENT) != 0);
 }
 
 /* A font table `[96 x u32 offsets][glyph images]` (G2 texture_cache.h): draw
@@ -700,7 +716,7 @@ static void draw_image(customCfwContext *ctx, cfw_object *o) {
 #define FONT_TABLE_CHARS 96u
 #define FONT_TABLE_BYTES (FONT_TABLE_CHARS * 4u)
 static int draw_font_text(customCfwContext *ctx, const uint8_t *font, uint32_t flen, int raw,
-                          const uint8_t *str, uint32_t n, int x, int y, uint8_t gray) {
+                          const uint8_t *str, uint32_t n, int x, int y, const uint8_t *lut, int transparent) {
     if (flen < FONT_TABLE_BYTES) return 0;
     for (uint32_t i = 0; i < n; i++) {
         uint32_t ch = str[i];
@@ -713,9 +729,9 @@ static int draw_font_text(customCfwContext *ctx, const uint8_t *font, uint32_t f
         if (raw) {
             uint32_t rowbytes = (w + 1u) / 2u;
             if (off + 2u + rowbytes * h > flen) return 0;
-            blit_rows(ctx, font + off + 2, w, h, rowbytes, x, y, gray);
+            blit_rows(ctx, font + off + 2, w, h, rowbytes, x, y, lut, transparent);
         } else {
-            w = blit_image(ctx, font + off, flen - off, x, y, gray);
+            w = blit_image(ctx, font + off, flen - off, x, y, lut, transparent);
             if (!w) return 0;
         }
         x += (int)w;
@@ -724,11 +740,12 @@ static int draw_font_text(customCfwContext *ctx, const uint8_t *font, uint32_t f
 }
 
 static void draw_text(customCfwContext *ctx, cfw_object *o) {
-    uint8_t gray = (uint8_t)(o->color & 0x0f);
-    if (!gray) gray = 15;
+    uint8_t lut[16];
+    make_lut(o->color, lut);
+    int transparent = (o->color & TEX_OPT_TRANSPARENT) != 0;
     if (o->type == SH_TEXT_INLINE) {
         if (o->text_len)
-            draw_font_text(ctx, font_builtin, FONT_BUILTIN_BYTES, 1, ctx->store + o->text_off, o->text_len, o->p[0], o->p[1], gray);
+            draw_font_text(ctx, font_builtin, FONT_BUILTIN_BYTES, 1, ctx->store + o->text_off, o->text_len, o->p[0], o->p[1], lut, transparent);
         return;
     }
     cfw_asset *s = asset_find(ctx, o->asset_id);
@@ -736,10 +753,10 @@ static void draw_text(customCfwContext *ctx, cfw_object *o) {
     if (o->type == SH_TEXT_CACHED && o->font_id) {
         cfw_asset *f = asset_find(ctx, o->font_id);
         if (f && (f->state & 1) &&
-            draw_font_text(ctx, ctx->store + f->offset, f->length, 0, ctx->store + s->offset, s->length, o->p[0], o->p[1], gray))
+            draw_font_text(ctx, ctx->store + f->offset, f->length, 0, ctx->store + s->offset, s->length, o->p[0], o->p[1], lut, transparent))
             return;
     }
-    draw_font_text(ctx, font_builtin, FONT_BUILTIN_BYTES, 1, ctx->store + s->offset, s->length, o->p[0], o->p[1], gray);
+    draw_font_text(ctx, font_builtin, FONT_BUILTIN_BYTES, 1, ctx->store + s->offset, s->length, o->p[0], o->p[1], lut, transparent);
 }
 
 void cfw_scene_hide(customCfwContext *ctx, cfw_lens *L) {
