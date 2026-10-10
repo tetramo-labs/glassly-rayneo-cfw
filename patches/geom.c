@@ -1,14 +1,11 @@
-/* Geometry rasterizer for the 540x180 L8 canvas: the 20-byte shape records of
- * the object cache (types 1..13), ported from the G2 Glassly CFW shapes.c and
- * retargeted from packed 4bpp to one byte per pixel. The panel is 1-bit, so a
- * record whose gray is below CFW_GRAY_ON draws nothing and everything else
- * writes CFW_PANEL_ON; the caller decides.
- *
- * Integer math only (no floats, no 64-bit division). Circles, rings and
- * rounded corners are scan-converted per row from an integer square root;
- * polygons, wide lines and pie sectors go through one even-odd scanline filler
- * in 1/16 px (Q4) sampled at pixel centers; curves and arcs are flattened to
- * short segments; hairlines are Bresenham. Coordinates are clamped to +-1024.
+/* Geometry rasterizer for the 540x220 L8 lens canvases: the 20-byte shape
+ * records of the object cache (types 1..13), ported from the G2 Glassly CFW
+ * shapes.c and retargeted from a 1-bit panel to 16 gray levels with
+ * anti-aliased edges. Every primitive is scan-converted per pixel row at four
+ * sub-rows, each sub-row's spans in 1/16 px (Q4), into a coverage row
+ * (0..64 per pixel) that is then blended over the canvas with the record's
+ * gray: edges get up to 4x16 shades, axis-aligned integer rectangles stay
+ * crisp. Integer math only (no floats, no 64-bit division).
  *
  *   1 LINE x1 y1 x2 y2 (width)      2 RECT x y w h r (width)   3 RECT_FILL x y w h r
  *   4 CIRCLE cx cy r (width)        5 CIRCLE_FILL cx cy r
@@ -24,6 +21,8 @@
 #define GPOLY_MAX     8u
 #define GBEZIER_SEGS  16u
 #define GARC_MAX_SEGS 72u
+#define GSUB          4            /* sub-rows per pixel row */
+#define GCOV_FULL     (GSUB * GQ4) /* coverage of a fully covered pixel */
 
 static uint32_t g_isqrt(uint32_t v) {
     uint32_t res = 0, bit = 1u << 30;
@@ -44,22 +43,63 @@ static int32_t g_div_floor(int32_t num, int32_t den) {
 
 static int32_t g_clamp(int32_t v, int32_t lo, int32_t hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-/* ---- pixel + span (L8) ----------------------------------------------------- */
-static void g_pixel(customCfwContext *ctx, int32_t x, int32_t y) {
-    if (x < 0 || y < 0 || x >= CFW_W || y >= CFW_H) return;
-    ctx->canvas_buf[(uint32_t)y * CFW_W + (uint32_t)x] = ctx->draw_gray;
+/* ---- coverage row ----------------------------------------------------------- */
+/* One pixel row being rasterized: per-pixel coverage in 1/16 of a sub-row,
+ * accumulated by the sub-row spans, then blended into the canvas once. */
+typedef struct {
+    uint8_t cov[CFW_W];
+    int32_t lo, hi;                /* pixel range touched (lo > hi: none) */
+} g_row;
+
+static void g_row_begin(g_row *r) { r->lo = CFW_W; r->hi = -1; }
+
+/* Add the Q4 span [a, b) of one sub-row (weight +16 per fully covered pixel). */
+static void g_row_add(g_row *r, int32_t a, int32_t b, int32_t sign) {
+    if (a < 0) a = 0;
+    if (b > CFW_W * GQ4) b = CFW_W * GQ4;
+    if (a >= b) return;
+    int32_t first = a >> 4, last = (b - 1) >> 4;
+    /* extend the touched range, zeroing newly covered pixels */
+    if (r->hi < r->lo) { for (int32_t i = first; i <= last; i++) r->cov[i] = 0; r->lo = first; r->hi = last; }
+    else {
+        for (int32_t i = first; i < r->lo; i++) r->cov[i] = 0;
+        for (int32_t i = r->hi + 1; i <= last; i++) r->cov[i] = 0;
+        if (first < r->lo) r->lo = first;
+        if (last > r->hi) r->hi = last;
+    }
+    if (first == last) {
+        int32_t c = (int32_t)r->cov[first] + sign * (b - a);
+        r->cov[first] = (uint8_t)g_clamp(c, 0, 255);
+        return;
+    }
+    int32_t c = (int32_t)r->cov[first] + sign * (GQ4 - (a & 15));
+    r->cov[first] = (uint8_t)g_clamp(c, 0, 255);
+    for (int32_t i = first + 1; i < last; i++) {
+        c = (int32_t)r->cov[i] + sign * GQ4;
+        r->cov[i] = (uint8_t)g_clamp(c, 0, 255);
+    }
+    c = (int32_t)r->cov[last] + sign * (((b - 1) & 15) + 1);
+    r->cov[last] = (uint8_t)g_clamp(c, 0, 255);
 }
 
-/* Inclusive [x0, x1] on row y; empty when x0 > x1. */
-static void g_hspan(customCfwContext *ctx, int32_t x0, int32_t x1, int32_t y) {
-    if (y < 0 || y >= CFW_H || x0 > x1 || x1 < 0 || x0 >= CFW_W) return;
-    if (x0 < 0) x0 = 0;
-    if (x1 >= CFW_W) x1 = CFW_W - 1;
+/* Blend the row into the canvas: dst += (gray - dst) * cov / 64. */
+static void g_row_flush(customCfwContext *ctx, g_row *r, int32_t y) {
+    if (y < 0 || y >= CFW_H || r->hi < r->lo) return;
     uint8_t *row = ctx->canvas_buf + (uint32_t)y * CFW_W;
-    for (int32_t i = x0; i <= x1; i++) row[i] = ctx->draw_gray;
+    int32_t gray = ctx->draw_gray;
+    for (int32_t i = r->lo; i <= r->hi; i++) {
+        int32_t c = r->cov[i];
+        if (!c) continue;
+        if (c >= GCOV_FULL) { row[i] = (uint8_t)gray; continue; }
+        int32_t d = row[i];
+        row[i] = (uint8_t)(d + ((gray - d) * c + GCOV_FULL / 2) / GCOV_FULL);
+    }
 }
 
-/* ---- rectangles and circles ------------------------------------------------ */
+/* Q4 y of sub-row s (0..3) of pixel row `row`. */
+static int32_t g_sub_y(int32_t row, int32_t s) { return row * GQ4 + 2 + 4 * s; }
+
+/* ---- circles and rounded rectangles ------------------------------------------- */
 static int32_t g_chord_half(int32_t rad16, int32_t dy16) {
     if (dy16 < 0) dy16 = -dy16;
     if (dy16 >= rad16) return -1;
@@ -67,31 +107,24 @@ static int32_t g_chord_half(int32_t rad16, int32_t dy16) {
     return (int32_t)g_isqrt(rr - dd);
 }
 
-static int g_span_pixels(int32_t a16, int32_t b16, int32_t *first, int32_t *last) {
-    *first = g_div_floor(a16 + 7, GQ4);
-    *last = g_div_floor(b16 + 7, GQ4) - 1;
-    return *first <= *last;
-}
-
-static int g_rrect_row(int32_t x, int32_t y, int32_t w, int32_t h, int32_t rad, int32_t row, int32_t *l, int32_t *rt) {
-    if (w <= 0 || h <= 0 || row < y || row >= y + h) return 0;
+/* Q4 horizontal extent [l, r) of a rounded rect at Q4 y; 0 outside. */
+static int g_rrect_span(int32_t x, int32_t y, int32_t w, int32_t h, int32_t rad, int32_t y16, int32_t *l, int32_t *r) {
+    if (w <= 0 || h <= 0 || y16 < y * GQ4 || y16 >= (y + h) * GQ4) return 0;
     int32_t maxr = (w < h ? w : h) / 2;
     if (rad > maxr) rad = maxr;
     if (rad < 0) rad = 0;
-    *l = x;
-    *rt = x + w - 1;
+    *l = x * GQ4;
+    *r = (x + w) * GQ4;
     if (rad == 0) return 1;
     int32_t dy16 = -1;
-    if (row < y + rad) dy16 = (y + rad - row) * GQ4 - 8;
-    else if (row >= y + h - rad) dy16 = (row - (y + h - rad)) * GQ4 + 8;
+    if (y16 < (y + rad) * GQ4) dy16 = (y + rad) * GQ4 - y16;
+    else if (y16 >= (y + h - rad) * GQ4) dy16 = y16 - (y + h - rad) * GQ4;
     if (dy16 < 0) return 1;
     int32_t half = g_chord_half(rad * GQ4, dy16);
     if (half < 0) return 0;
-    int32_t first, last;
-    if (!g_span_pixels(x * GQ4 + rad * GQ4 - half, (x + w) * GQ4 - rad * GQ4 + half, &first, &last)) return 0;
-    *l = first;
-    *rt = last;
-    return 1;
+    *l = (x + rad) * GQ4 - half;
+    *r = (x + w - rad) * GQ4 + half;
+    return *l < *r;
 }
 
 /* Rounded rectangle: filled when wd <= 0, else a border of width wd. */
@@ -100,15 +133,16 @@ static void g_rrect(customCfwContext *ctx, int32_t x, int32_t y, int32_t w, int3
     int inner = wd > 0 && w > 2 * wd && h > 2 * wd;
     int32_t y0 = y < 0 ? 0 : y, y1 = y + h;
     if (y1 > CFW_H) y1 = CFW_H;
+    g_row r;
     for (int32_t row = y0; row < y1; row++) {
-        int32_t ol, orr, il, ir;
-        if (!g_rrect_row(x, y, w, h, rad, row, &ol, &orr)) continue;
-        if (inner && g_rrect_row(x + wd, y + wd, w - 2 * wd, h - 2 * wd, rad - wd, row, &il, &ir)) {
-            g_hspan(ctx, ol, il - 1, row);
-            g_hspan(ctx, ir + 1, orr, row);
-        } else {
-            g_hspan(ctx, ol, orr, row);
+        g_row_begin(&r);
+        for (int32_t s = 0; s < GSUB; s++) {
+            int32_t ys = g_sub_y(row, s), ol, orr, il, ir;
+            if (!g_rrect_span(x, y, w, h, rad, ys, &ol, &orr)) continue;
+            g_row_add(&r, ol, orr, 1);
+            if (inner && g_rrect_span(x + wd, y + wd, w - 2 * wd, h - 2 * wd, rad - wd, ys, &il, &ir)) g_row_add(&r, il, ir, -1);
         }
+        g_row_flush(ctx, &r, row);
     }
 }
 
@@ -117,26 +151,24 @@ static void g_circle(customCfwContext *ctx, int32_t cx, int32_t cy, int32_t rad,
     if (rad < 0) return;
     int32_t rad16 = rad * GQ4 + 8;
     int32_t in16 = wd > 0 && rad > wd ? (rad - wd) * GQ4 + 8 : -1;
-    int32_t cx16 = cx * GQ4 + 8;
-    for (int32_t row = cy - rad; row <= cy + rad; row++) {
+    int32_t cx16 = cx * GQ4 + 8, cy16 = cy * GQ4 + 8;
+    g_row r;
+    for (int32_t row = cy - rad - 1; row <= cy + rad + 1; row++) {
         if (row < 0 || row >= CFW_H) continue;
-        int32_t dy16 = (cy - row) * GQ4;
-        int32_t ho = g_chord_half(rad16, dy16);
-        if (ho < 0) continue;
-        int32_t of, ol;
-        if (!g_span_pixels(cx16 - ho, cx16 + ho, &of, &ol)) continue;
-        int32_t hi = in16 > 0 ? g_chord_half(in16, dy16) : -1;
-        int32_t inf, inl;
-        if (hi > 0 && g_span_pixels(cx16 - hi, cx16 + hi, &inf, &inl)) {
-            g_hspan(ctx, of, inf - 1, row);
-            g_hspan(ctx, inl + 1, ol, row);
-        } else {
-            g_hspan(ctx, of, ol, row);
+        g_row_begin(&r);
+        for (int32_t s = 0; s < GSUB; s++) {
+            int32_t dy16 = cy16 - g_sub_y(row, s);
+            int32_t ho = g_chord_half(rad16, dy16);
+            if (ho < 0) continue;
+            g_row_add(&r, cx16 - ho, cx16 + ho, 1);
+            int32_t hi = in16 > 0 ? g_chord_half(in16, dy16) : -1;
+            if (hi > 0) g_row_add(&r, cx16 - hi, cx16 + hi, -1);
         }
+        g_row_flush(ctx, &r, row);
     }
 }
 
-/* ---- polygons (Q4 vertices, even-odd, center sampled) ---------------------- */
+/* ---- polygons (Q4 vertices, even-odd, four sub-rows per pixel row) ---------- */
 static void g_fill_poly_q4(customCfwContext *ctx, const int32_t *px, const int32_t *py, uint32_t n) {
     if (n < 3 || n > GPOLY_MAX) return;
     int32_t ymin = py[0], ymax = py[0];
@@ -147,51 +179,37 @@ static void g_fill_poly_q4(customCfwContext *ctx, const int32_t *px, const int32
     int32_t row0 = g_div_floor(ymin, GQ4), row1 = g_div_floor(ymax, GQ4);
     if (row0 < 0) row0 = 0;
     if (row1 >= CFW_H) row1 = CFW_H - 1;
+    g_row r;
     for (int32_t row = row0; row <= row1; row++) {
-        int32_t yc = row * GQ4 + 8;
-        int32_t xs[GPOLY_MAX];
-        uint32_t k = 0;
-        for (uint32_t i = 0; i < n; i++) {
-            uint32_t j = (i + 1 == n) ? 0 : i + 1;
-            int32_t ax = px[i], ay = py[i], bx = px[j], by = py[j];
-            if (ay == by) continue;
-            if (ay > by) { int32_t t = ax; ax = bx; bx = t; t = ay; ay = by; by = t; }
-            if (yc < ay || yc >= by) continue;
-            xs[k++] = ax + g_div_floor((yc - ay) * (bx - ax), by - ay);
+        g_row_begin(&r);
+        for (int32_t s = 0; s < GSUB; s++) {
+            int32_t yc = g_sub_y(row, s);
+            int32_t xs[GPOLY_MAX];
+            uint32_t k = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t j = (i + 1 == n) ? 0 : i + 1;
+                int32_t ax = px[i], ay = py[i], bx = px[j], by = py[j];
+                if (ay == by) continue;
+                if (ay > by) { int32_t t = ax; ax = bx; bx = t; t = ay; ay = by; by = t; }
+                if (yc < ay || yc >= by) continue;
+                xs[k++] = ax + g_div_floor((yc - ay) * (bx - ax), by - ay);
+            }
+            for (uint32_t i = 1; i < k; i++) {
+                int32_t v = xs[i];
+                uint32_t j = i;
+                while (j > 0 && xs[j - 1] > v) { xs[j] = xs[j - 1]; j--; }
+                xs[j] = v;
+            }
+            for (uint32_t i = 0; i + 1 < k; i += 2) g_row_add(&r, xs[i], xs[i + 1], 1);
         }
-        for (uint32_t i = 1; i < k; i++) {
-            int32_t v = xs[i];
-            uint32_t j = i;
-            while (j > 0 && xs[j - 1] > v) { xs[j] = xs[j - 1]; j--; }
-            xs[j] = v;
-        }
-        for (uint32_t i = 0; i + 1 < k; i += 2) {
-            int32_t first, last;
-            if (g_span_pixels(xs[i], xs[i + 1], &first, &last)) g_hspan(ctx, first, last, row);
-        }
+        g_row_flush(ctx, &r, row);
     }
 }
 
 /* ---- lines ----------------------------------------------------------------- */
-static void g_hairline(customCfwContext *ctx, int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
-    int32_t dx = x1 > x0 ? x1 - x0 : x0 - x1, dy = y1 > y0 ? y1 - y0 : y0 - y1;
-    int32_t sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
-    int32_t err = dx - dy;
-    for (;;) {
-        g_pixel(ctx, x0, y0);
-        if (x0 == x1 && y0 == y1) break;
-        int32_t e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; x0 += sx; }
-        if (e2 < dx) { err += dx; y0 += sy; }
-    }
-}
-
-/* Line between Q4 points; widths >= 2 become a filled quad with square caps. */
+/* Line between Q4 points as a filled quad with square caps; width 1 for hairlines. */
 static void g_line_q4(customCfwContext *ctx, int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t wd) {
-    if (wd <= 1) {
-        g_hairline(ctx, g_div_floor(x0, GQ4), g_div_floor(y0, GQ4), g_div_floor(x1, GQ4), g_div_floor(y1, GQ4));
-        return;
-    }
+    if (wd < 1) wd = 1;
     int32_t dx = x1 - x0, dy = y1 - y0;
     uint32_t len = g_isqrt((uint32_t)(dx * dx) + (uint32_t)(dy * dy));
     int32_t hw = wd * 8;
@@ -203,8 +221,10 @@ static void g_line_q4(customCfwContext *ctx, int32_t x0, int32_t y0, int32_t x1,
     }
     int32_t ex = dx * hw / (int32_t)len, ey = dy * hw / (int32_t)len;
     int32_t nx = -ey, ny = ex;
-    int32_t px[4] = { x0 - ex + nx, x1 + ex + nx, x1 + ex - nx, x0 - ex - nx };
-    int32_t py[4] = { y0 - ey + ny, y1 + ey + ny, y1 + ey - ny, y0 - ey - ny };
+    /* a hairline keeps its endpoints (no caps), wider strokes get square caps */
+    int32_t cx = wd > 1 ? ex : 0, cy = wd > 1 ? ey : 0;
+    int32_t px[4] = { x0 - cx + nx, x1 + cx + nx, x1 + cx - nx, x0 - cx - nx };
+    int32_t py[4] = { y0 - cy + ny, y1 + cy + ny, y1 + cy - ny, y0 - cy - ny };
     g_fill_poly_q4(ctx, px, py, 4);
 }
 
@@ -293,26 +313,34 @@ static void g_arc(customCfwContext *ctx, int32_t cx, int32_t cy, int32_t rad, in
     }
 }
 
+/* Pie sector: one polygon (centre + rim points), so the seams between the
+ * flattening segments blend instead of double-covering. */
 static void g_pie(customCfwContext *ctx, int32_t cx, int32_t cy, int32_t rad, int32_t a0, int32_t a1) {
     if (rad <= 0) return;
     int32_t span = g_clamp(a1 - a0, -360, 360);
     if (span == 0) return;
     uint32_t n = g_arc_segments(span);
-    int32_t px[3], py[3];
+    /* GPOLY_MAX vertices per polygon: draw the sector as fans of up to 6 rim points */
+    int32_t px[GPOLY_MAX], py[GPOLY_MAX];
     px[0] = g_q4(cx);
     py[0] = g_q4(cy);
-    g_arc_point(cx, cy, rad, a0, &px[1], &py[1]);
-    for (uint32_t i = 1; i <= n; i++) {
-        g_arc_point(cx, cy, rad, a0 + span * (int32_t)i / (int32_t)n, &px[2], &py[2]);
-        g_fill_poly_q4(ctx, px, py, 3);
-        px[1] = px[2];
-        py[1] = py[2];
+    uint32_t i = 0;
+    while (i < n) {
+        uint32_t k = 1;
+        g_arc_point(cx, cy, rad, a0 + span * (int32_t)i / (int32_t)n, &px[k], &py[k]);
+        k++;
+        while (i < n && k < GPOLY_MAX) {
+            i++;
+            g_arc_point(cx, cy, rad, a0 + span * (int32_t)i / (int32_t)n, &px[k], &py[k]);
+            k++;
+        }
+        g_fill_poly_q4(ctx, px, py, k);
     }
 }
 
 /* ---- dispatch -------------------------------------------------------------- */
 /* Draw one geometry record (type 1..13) with its eight i16 parameters and
- * stroke width; the caller has already decided the gray is "on". */
+ * stroke width in ctx->draw_gray. */
 void cfw_geom_draw(customCfwContext *ctx, uint8_t type, uint8_t width, const int16_t *params) {
     if (!ctx->canvas_buf) return;
     int32_t p[8];

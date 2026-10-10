@@ -292,14 +292,17 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define CROWN_PER_DETENT_U 600u
 
 /* ---- object cache capacities ---------------------------------------------- */
-#define CACHE_OBJECTS 64u
-#define CACHE_ASSETS  64u
+#define CACHE_OBJECTS 256u         /* per lens, as the G2 */
+#define CACHE_ASSETS  128u
 #define CACHE_LABELS  8u           /* inline-text label pool on the page root */
 
 typedef struct {
     uint32_t id, version, offset, length, filled;
+    uint32_t last_use;             /* use clock of the last object that drew it (LRU) */
     uint8_t kind, state;           /* state bit0 = complete */
 } cfw_asset;
+#define STORE_GRANULE 64u          /* store allocator unit (bitmap of CFW_STORE_BYTES / 64 bits) */
+#define STORE_GRANULES (CFW_STORE_BYTES / STORE_GRANULE)
 
 typedef struct {
     uint32_t id, version, asset_id, font_id;
@@ -308,9 +311,11 @@ typedef struct {
     int16_t x, y, w, h, r;         /* image/text placement (= p[0..4]) */
     int16_t p[8];                  /* geometry: the record's eight params (current) */
     int16_t from[8], to[8];        /* tween endpoints while frames != 0 */
+    uint32_t last_use;             /* use clock when last put or shown (LRU eviction) */
     uint8_t type, options, color, active;
     uint8_t width;                 /* geometry stroke width (record byte 3) */
     uint8_t flags;                 /* OBJ_VISIBLE */
+    uint8_t pinned;                /* referenced by the SHOW being applied: not evictable */
     uint8_t frame, frames;         /* animation progress; frames 0 = idle */
     uint8_t curve[4];              /* cubic-bezier easing x1 y1 x2 y2, /255 */
     uint8_t color_from, color_to, width_from, width_to;
@@ -386,7 +391,10 @@ typedef struct {
     /* ingress */
     cfw_stream stream;
     uint8_t *store;
-    uint32_t store_used;
+    uint32_t store_used;           /* bytes in use (diagnostics) */
+    uint8_t store_map[STORE_GRANULES / 8]; /* granule bitmap: 1 = allocated */
+    uint32_t use_clock;            /* LRU clock, bumped per put/show */
+    uint32_t evicted;              /* objects evicted while applying the current message */
     cfw_asset assets[CACHE_ASSETS];
     cfw_lens lens[2];
     uint32_t epoch_revision;
@@ -458,8 +466,12 @@ void cfw_anim_settled(customCfwContext *ctx, cfw_lens *L);
 void cfw_scene_render(customCfwContext *ctx, cfw_lens *L);
 void cfw_scene_hide(customCfwContext *ctx, cfw_lens *L);
 void cfw_scene_reset(customCfwContext *ctx, uint8_t cap);
+/* `extra` (<= REPLY_EXTRA_MAX bytes, length in *extra_len) follows the REPLY's
+ * revision word: [evicted] after APPLIED/CAPACITY, [evicted][store KiB u16]
+ * after a RESET, [n][more][id u32 x n] after MISSING (G2 scene.c). */
+#define REPLY_EXTRA_MAX 170u
 int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len,
-                      uint8_t *status, uint16_t *request, int first);
+                      uint8_t *status, uint16_t *request, int first, uint8_t *extra, uint8_t *extra_len);
 cfw_object *object_find(cfw_lens *L, uint32_t id);
 uint16_t rd16(const uint8_t *p);
 uint32_t rd32(const uint8_t *p);

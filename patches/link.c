@@ -110,8 +110,9 @@ static void send_ack(customCfwContext *ctx, uint8_t lens, uint8_t kind, uint16_t
     cfw_uplink_push(ctx, b, sizeof(b));
 }
 
-static void send_reply(customCfwContext *ctx, uint8_t lens, uint8_t mode, uint16_t request, uint8_t status, uint16_t epoch) {
-    uint8_t b[15];
+static void send_reply(customCfwContext *ctx, uint8_t lens, uint8_t mode, uint16_t request, uint8_t status, uint16_t epoch,
+                       const uint8_t *extra, uint8_t extra_len) {
+    uint8_t b[15 + REPLY_EXTRA_MAX];
     b[0] = RPL_REPLY;
     b[1] = ctx->stream.stream_id;
     cfw_put16(b + 2, ctx->stream.ordinal);
@@ -121,7 +122,9 @@ static void send_reply(customCfwContext *ctx, uint8_t lens, uint8_t mode, uint16
     b[8] = status;
     cfw_put16(b + 9, epoch);
     cfw_put32(b + 11, ctx->epoch_revision);
-    cfw_uplink_push(ctx, b, sizeof(b));
+    if (extra_len > REPLY_EXTRA_MAX) extra_len = REPLY_EXTRA_MAX;
+    for (uint8_t i = 0; i < extra_len; i++) b[15 + i] = extra[i];
+    cfw_uplink_push(ctx, b, (uint8_t)(15 + extra_len));
 }
 
 /* ---- record handler -------------------------------------------------------- */
@@ -172,9 +175,11 @@ static void cfw_record(customCfwContext *ctx, const uint8_t *wire, uint32_t tota
         cfw_lens *L = &ctx->lens[lb == LENS_LEFT ? 0 : 1];
         uint8_t status = ST_APPLIED;
         uint16_t request = 0;
-        int handled = dlen >= 5 ? cfw_scene_message(ctx, L, data, dlen, &status, &request, first) : 0;
+        uint8_t extra[REPLY_EXTRA_MAX];
+        uint8_t extra_len = 0;
+        int handled = dlen >= 5 ? cfw_scene_message(ctx, L, data, dlen, &status, &request, first, extra, &extra_len) : 0;
         if (handled) {
-            send_reply(ctx, lb, data[0], request, status, (uint16_t)(data[1] | (data[2] << 8)));
+            send_reply(ctx, lb, data[0], request, status, (uint16_t)(data[1] | (data[2] << 8)), extra, extra_len);
             send_ack(ctx, lb, RPL_ACK, (uint16_t)dlen, crc);
         } else {
             send_ack(ctx, lb, RPL_NACK, (uint16_t)dlen, crc);

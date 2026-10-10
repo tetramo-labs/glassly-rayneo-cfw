@@ -309,9 +309,16 @@ In order:
 3. Builtin bitmap font, page.c without LVGL drawing: built.
 4. Button input via the HAL key callback; swallow while the page is open.
 5. `vector.c`: PATH records (SVG) and ROTATE ops, with the heap workspace.
-6. Object cache parity: LRU eviction + journal, MISSING id lists,
-   CAPACITY/evicted counts, asset pinning, the KEEP/FREEZE semantics exactly
-   as scene.c; texture options (transparent source color, inverse ramp).
+6. Object cache parity: built (2026-10-09 night): 256 objects per lens,
+   128 assets, a granule-bitmap store with free, LRU eviction (unreferenced
+   assets first, then the least recently used object that is neither active
+   nor pinned by the SHOW being applied), MISSING id lists, the [evicted]
+   and RESET [evicted][store KiB] reply extras. Still open: the journal
+   (DELTA/SNAPSHOT), texture options.
+   Also built: anti-aliased geometry (geom.c: four sub-rows per pixel row,
+   Q4 spans into a coverage row blended with the record's gray) and the
+   g2flash shapes suite ported to tools/g2suite over the harness bridge
+   (`rayneo-io bridge`): 43 cases, the same data and pipeline as on the G2.
 7. Page on wake (settings_ext wake takeover) via the display screen-state
    callbacks, if the launcher's idle gate allows an overlay there.
 8. Direct-framebuffer modes (3/6, mode-8 bundles, mode 36): natural once the

@@ -36,7 +36,8 @@ def main():
         for y in range(h):
             row = bytearray((w + 1) // 2)
             for x in range(w):
-                v = img.getpixel((x, y)) >> 4
+                # crisp 1-bit glyphs: antialiased edges read as blur on the coarse panel
+                v = 15 if img.getpixel((x, y)) >= 128 else 0
                 if x & 1:
                     row[x >> 1] |= v << 4
                 else:

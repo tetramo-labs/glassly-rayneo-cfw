@@ -1,0 +1,16 @@
+{
+  "name": "rayneo-io-g2suite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The g2flash demos' shapes suite for the RayNeo iO Glassly CFW, over the Mac harness bridge.",
+  "scripts": {
+    "suite": "bun shapes-suite.ts",
+    "list": "bun shapes-suite.ts --list",
+    "dry": "G2_DRY_RUN=1 bun shapes-suite.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}

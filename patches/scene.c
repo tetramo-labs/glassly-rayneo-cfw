@@ -18,12 +18,40 @@ uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 static int16_t rds16(const uint8_t *p) { return (int16_t)rd16(p); }
 
-/* ---- store allocator (bump; the whole store is reset on RESET) ------------- */
+/* ---- store allocator (granule bitmap, first fit; assets and inline strings
+ * are freed when evicted, as in the G2 scene.c) ----------------------------- */
+static uint32_t store_granules(uint32_t len) { return (len + STORE_GRANULE - 1u) / STORE_GRANULE; }
+static int store_bit(const customCfwContext *ctx, uint32_t g) { return (ctx->store_map[g >> 3] >> (g & 7u)) & 1u; }
+static void store_mark(customCfwContext *ctx, uint32_t g0, uint32_t n, int set) {
+    for (uint32_t g = g0; g < g0 + n; g++) {
+        if (set) ctx->store_map[g >> 3] |= (uint8_t)(1u << (g & 7u));
+        else ctx->store_map[g >> 3] &= (uint8_t)~(1u << (g & 7u));
+    }
+}
 static uint32_t store_alloc(customCfwContext *ctx, uint32_t n) {
-    uint32_t a = (ctx->store_used + 15u) & ~15u;
-    if (a + n > CFW_STORE_BYTES) return 0xffffffffu;
-    ctx->store_used = a + n;
-    return a;
+    uint32_t need = store_granules(n ? n : 1u);
+    uint32_t run = 0;
+    for (uint32_t g = 0; g < STORE_GRANULES; g++) {
+        run = store_bit(ctx, g) ? 0 : run + 1;
+        if (run == need) {
+            uint32_t g0 = g + 1u - need;
+            store_mark(ctx, g0, need, 1);
+            ctx->store_used += need * STORE_GRANULE;
+            return g0 * STORE_GRANULE;
+        }
+    }
+    return 0xffffffffu;
+}
+static void store_free(customCfwContext *ctx, uint32_t offset, uint32_t len) {
+    if (!len || offset >= CFW_STORE_BYTES) return;
+    uint32_t g0 = offset / STORE_GRANULE, n = store_granules(len);
+    if (g0 + n > STORE_GRANULES) n = STORE_GRANULES - g0;
+    store_mark(ctx, g0, n, 0);
+    ctx->store_used -= n * STORE_GRANULE;
+}
+static void store_clear(customCfwContext *ctx) {
+    cfw_zero(ctx->store_map, sizeof(ctx->store_map));
+    ctx->store_used = 0;
 }
 
 static cfw_asset *asset_find(customCfwContext *ctx, uint32_t id) {
@@ -31,20 +59,81 @@ static cfw_asset *asset_find(customCfwContext *ctx, uint32_t id) {
         if (ctx->assets[i].id == id && id) return &ctx->assets[i];
     return 0;
 }
-static cfw_asset *asset_slot(customCfwContext *ctx) {
-    for (unsigned i = 0; i < CACHE_ASSETS; i++)
-        if (!ctx->assets[i].id) return &ctx->assets[i];
-    return 0;
-}
 cfw_object *object_find(cfw_lens *L, uint32_t id) {
     for (unsigned i = 0; i < CACHE_OBJECTS; i++)
         if (L->objects[i].id == id && id) return &L->objects[i];
     return 0;
 }
-static cfw_object *object_slot(cfw_lens *L) {
-    for (unsigned i = 0; i < CACHE_OBJECTS; i++)
-        if (!L->objects[i].id) return &L->objects[i];
+
+/* ---- eviction (G2 scene.c): unreferenced assets first, then the least
+ * recently used object that is neither active nor pinned ------------------- */
+static void object_free(customCfwContext *ctx, cfw_object *o) {
+    if (o->text_len) store_free(ctx, o->text_off, (uint32_t)o->text_len + 1u);
+    cfw_zero(o, sizeof(*o));
+}
+static void asset_free(customCfwContext *ctx, cfw_asset *a) {
+    store_free(ctx, a->offset, a->length);
+    cfw_zero(a, sizeof(*a));
+}
+static int asset_referenced(const customCfwContext *ctx, uint32_t id) {
+    for (unsigned e = 0; e < 2; e++)
+        for (unsigned i = 0; i < CACHE_OBJECTS; i++) {
+            const cfw_object *o = &ctx->lens[e].objects[i];
+            if (o->id && (o->asset_id == id || o->font_id == id)) return 1;
+        }
     return 0;
+}
+static int evict_asset(customCfwContext *ctx) {
+    int best = -1;
+    for (unsigned i = 0; i < CACHE_ASSETS; i++) {
+        const cfw_asset *a = &ctx->assets[i];
+        if (!a->id || asset_referenced(ctx, a->id)) continue;
+        if (best < 0 || a->last_use < ctx->assets[best].last_use) best = (int)i;
+    }
+    if (best < 0) return 0;
+    asset_free(ctx, &ctx->assets[best]);
+    return 1;
+}
+/* Evict the LRU evictable object of lens L, or of either lens when L is NULL. */
+static int evict_object(customCfwContext *ctx, cfw_lens *L) {
+    cfw_object *best = 0;
+    for (unsigned e = 0; e < 2; e++) {
+        cfw_lens *lens = &ctx->lens[e];
+        if (L && lens != L) continue;
+        for (unsigned i = 0; i < CACHE_OBJECTS; i++) {
+            cfw_object *o = &lens->objects[i];
+            if (!o->id || o->active || o->pinned) continue;
+            if (!best || o->last_use < best->last_use) best = o;
+        }
+    }
+    if (!best) return 0;
+    object_free(ctx, best);
+    ctx->evicted++;
+    return 1;
+}
+static cfw_object *object_slot(customCfwContext *ctx, cfw_lens *L) {
+    for (;;) {
+        for (unsigned i = 0; i < CACHE_OBJECTS; i++)
+            if (!L->objects[i].id) return &L->objects[i];
+        if (!evict_object(ctx, L)) return 0;
+    }
+}
+static cfw_asset *asset_slot(customCfwContext *ctx) {
+    for (;;) {
+        cfw_asset *a = 0;
+        for (unsigned i = 0; i < CACHE_ASSETS && !a; i++)
+            if (!ctx->assets[i].id) a = &ctx->assets[i];
+        if (a) return a;
+        if (!evict_asset(ctx) && !evict_object(ctx, 0)) return 0;
+    }
+}
+/* Store space, evicting unreferenced assets then LRU objects until it fits. */
+static uint32_t store_reserve(customCfwContext *ctx, uint32_t n) {
+    for (;;) {
+        uint32_t off = store_alloc(ctx, n);
+        if (off != 0xffffffffu) return off;
+        if (!evict_asset(ctx) && !evict_object(ctx, 0)) return 0xffffffffu;
+    }
 }
 
 static void lens_reset(cfw_lens *L) {
@@ -63,7 +152,8 @@ void cfw_scene_reset(customCfwContext *ctx, uint8_t cap) {
     for (unsigned i = 0; i < CACHE_ASSETS; i++) cfw_zero(&ctx->assets[i], sizeof(ctx->assets[i]));
     lens_reset(&ctx->lens[0]);
     lens_reset(&ctx->lens[1]);
-    ctx->store_used = 0;
+    store_clear(ctx);
+    ctx->use_clock = 0;
     ctx->epoch_revision++;
 }
 
@@ -100,8 +190,8 @@ static int shape_into(customCfwContext *ctx, cfw_object *o, const uint8_t *rec, 
         o->w = rds16(rec + 8); o->h = rds16(rec + 10);
         uint8_t slen = rec[12];
         if ((uint32_t)13 + slen > len) return 0;
-        uint32_t off = store_alloc(ctx, slen + 1u);
-        if (off == 0xffffffffu) return 0;
+        uint32_t off = store_reserve(ctx, slen + 1u);
+        if (off == 0xffffffffu) return -1;         /* store full even after eviction */
         memcpy(ctx->store + off, rec + 13, slen);
         ctx->store[off + slen] = 0;
         o->text_off = off; o->text_len = slen;
@@ -147,14 +237,15 @@ static int put_entry(customCfwContext *ctx, cfw_lens *L, const uint8_t *e, uint3
         if ((uint32_t)20 + dl > len || offset + dl > total || total > CFW_STORE_BYTES) return ST_REFUSED;
         cfw_asset *a = asset_find(ctx, id);
         if (!a || a->version != ver) {
-            if (a && a->version != ver) cfw_zero(a, sizeof(*a));  /* superseded */
+            if (a && a->version != ver) asset_free(ctx, a);      /* superseded */
             a = asset_slot(ctx);
             if (!a) return ST_CAPACITY;
-            uint32_t base = store_alloc(ctx, total);
+            uint32_t base = store_reserve(ctx, total);
             if (base == 0xffffffffu) return ST_CAPACITY;
             a->id = id; a->version = ver; a->kind = akind;
             a->length = total; a->offset = base; a->filled = 0; a->state = 0;
         }
+        a->last_use = ctx->use_clock;
         memcpy(ctx->store + a->offset + offset, e + 20, dl);
         if (offset + dl > a->filled) a->filled = offset + dl;
         if (a->filled >= a->length) a->state |= 1;   /* complete */
@@ -164,15 +255,19 @@ static int put_entry(customCfwContext *ctx, cfw_lens *L, const uint8_t *e, uint3
         if (len < 9) return ST_REFUSED;
         uint32_t id = rd32(e + 1), ver = rd32(e + 5);
         cfw_object *o = object_find(L, id);
-        if (!o) o = object_slot(L);
+        if (!o) o = object_slot(ctx, L);
         if (!o) return ST_CAPACITY;
         uint32_t pid = o->id ? o->id : id;
-        uint8_t was_active = o->active;
+        uint8_t was_active = o->active, was_pinned = o->pinned;
+        if (o->text_len) store_free(ctx, o->text_off, (uint32_t)o->text_len + 1u);
         cfw_zero(o, sizeof(*o));
         o->id = pid; o->version = ver;
         o->active = was_active;
+        o->pinned = was_pinned;
         o->flags = OBJ_VISIBLE;
-        if (!shape_into(ctx, o, e + 9, len - 9)) { o->id = 0; return ST_REFUSED; }
+        o->last_use = ++ctx->use_clock;
+        int shaped = shape_into(ctx, o, e + 9, len - 9);
+        if (shaped <= 0) { o->id = 0; return shaped < 0 ? ST_CAPACITY : ST_REFUSED; }
         return ST_APPLIED;
     }
     return ST_REFUSED;
@@ -182,7 +277,7 @@ static int put_entry(customCfwContext *ctx, cfw_lens *L, const uint8_t *e, uint3
 /* One lens's view of a message. `first` is set for the first targeted lens of
  * a record, so shared state (store, epoch) is touched once per record. */
 int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len,
-                      uint8_t *status, uint16_t *request, int first) {
+                      uint8_t *status, uint16_t *request, int first, uint8_t *extra, uint8_t *extra_len) {
     if (len < 5) return 0;
     uint8_t mode = msg[0];
     uint16_t epoch = rd16(msg + 1);
@@ -190,6 +285,8 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
     const uint8_t *body = msg + 5;
     uint32_t blen = len - 5;
     *status = ST_APPLIED;
+    *extra_len = 0;
+    ctx->evicted = 0;
 
     if (mode == MSG_RESET) {
         uint8_t cap = blen >= 2 ? body[1] : 0;
@@ -199,6 +296,8 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
             cfw_scene_hide(ctx, &ctx->lens[0]);
             cfw_scene_hide(ctx, &ctx->lens[1]);
         }
+        /* [evicted][store KiB u16]: the phone sizes its asset mirror from this */
+        extra[0] = 0; cfw_put16(extra + 1, STORE_KIB); *extra_len = 3;
         return 1;
     }
     if (epoch != ctx->stream.epoch) { *status = ST_STALE; return 1; }
@@ -210,6 +309,8 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
         /* one entry per PUT message on RayNeo (<= 8192 B); an asset PUT applied
          * for the second lens finds the asset already stored and is a no-op */
         if (blen) { uint8_t r = (uint8_t)put_entry(ctx, L, body, blen); if (r != ST_APPLIED) *status = r; }
+        if (*status == ST_APPLIED || *status == ST_CAPACITY) { extra[0] = (uint8_t)(ctx->evicted > 255u ? 255u : ctx->evicted); *extra_len = 1; }
+        if (ctx->evicted) ctx->epoch_revision++;
         return 1;
     }
     if (mode == MSG_HIDE) {
@@ -231,28 +332,58 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
         uint32_t off = 3;
         /* inline PUT entries carried in the SHOW, back to back with no length
          * prefix (G2CfwScene.showPayload); each entry's size follows from its
-         * kind and record type */
-        for (uint8_t i = 0; i < puts && off < blen; i++) {
+         * kind and record type. Size them first to find the reference list,
+         * and pin every referenced resident object so no inline put can evict
+         * what this SHOW is about to display (G2 scene.c). */
+        uint32_t puts_end = off;
+        for (uint8_t i = 0; i < puts && puts_end < blen; i++) {
+            uint32_t elen = put_entry_len(body + puts_end, blen - puts_end);
+            if (!elen || puts_end + elen > blen) { *status = ST_REFUSED; return 1; }
+            puts_end += elen;
+        }
+        if (puts_end + 2 > blen) { *status = ST_REFUSED; return 1; }
+        uint16_t count = rd16(body + puts_end);
+        if (count > CACHE_OBJECTS || puts_end + 2 + 8u * count > blen) { *status = ST_REFUSED; return 1; }
+        if ((flags & SHOW_FLAG_KEEP) && count) { *status = ST_REFUSED; return 1; }
+        for (uint16_t i = 0; i < count; i++) {
+            cfw_object *o = object_find(L, rd32(body + puts_end + 2 + 8u * i));
+            if (o) o->pinned = 1;
+        }
+        uint8_t put_status = ST_APPLIED;
+        for (uint8_t i = 0; i < puts && off < puts_end; i++) {
             uint32_t elen = put_entry_len(body + off, blen - off);
-            if (!elen || off + elen > blen) { *status = ST_REFUSED; return 1; }
             uint8_t r = (uint8_t)put_entry(ctx, L, body + off, elen);
-            if (r != ST_APPLIED) { *status = r; return 1; }
+            if (r != ST_APPLIED) { put_status = r; break; }
             off += elen;
         }
-        if (off + 2 > blen) { *status = ST_REFUSED; return 1; }
-        uint16_t count = rd16(body + off); off += 2;
-        if (count > CACHE_OBJECTS) { *status = ST_REFUSED; return 1; }
-        if ((flags & SHOW_FLAG_KEEP) && count) { *status = ST_REFUSED; return 1; }
-        /* resolve the references first; a missing one leaves the scene unchanged */
+        for (unsigned i = 0; i < CACHE_OBJECTS; i++) L->objects[i].pinned = 0;
+        if (put_status != ST_APPLIED) {
+            *status = put_status;
+            if (put_status == ST_CAPACITY) { extra[0] = (uint8_t)(ctx->evicted > 255u ? 255u : ctx->evicted); *extra_len = 1; }
+            return 1;
+        }
+        off = puts_end + 2;
+        /* resolve the references; missing ones are listed and the scene is unchanged */
         uint16_t next[CACHE_OBJECTS];
+        uint32_t missing = 0;
+        extra[0] = 0; extra[1] = 0;
         for (uint16_t i = 0; i < count; i++) {
-            if (off + 8 > blen) { *status = ST_REFUSED; return 1; }
             uint32_t id = rd32(body + off);
             uint32_t ver = rd32(body + off + 4);
             off += 8;
             cfw_object *o = object_find(L, id);
-            if (!o || o->version != ver) { *status = ST_MISSING; return 1; }
+            if (!o || o->version != ver) {
+                if (2u + 4u * (missing + 1u) <= REPLY_EXTRA_MAX) { cfw_put32(extra + 2 + 4 * missing, id); missing++; }
+                else extra[1] = 1;              /* more than fit */
+                continue;
+            }
             next[i] = (uint16_t)(o - L->objects);
+        }
+        if (missing) {
+            extra[0] = (uint8_t)missing;
+            *extra_len = (uint8_t)(2 + 4 * missing);
+            *status = ST_MISSING;
+            return 1;
         }
         /* ops: syntax, then targets against the incoming active set */
         uint32_t ops = off;
@@ -285,6 +416,15 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
             }
             for (uint16_t i = 0; i < count; i++) L->active_list[i] = next[i];
             L->active_count = count;
+            /* shown objects and their assets are the most recently used */
+            uint32_t now = ++ctx->use_clock;
+            for (uint16_t i = 0; i < count; i++) {
+                cfw_object *o = &L->objects[next[i]];
+                o->last_use = now;
+                cfw_asset *a;
+                if (o->asset_id && (a = asset_find(ctx, o->asset_id))) a->last_use = now;
+                if (o->font_id && (a = asset_find(ctx, o->font_id))) a->last_use = now;
+            }
         }
         if (flags & SHOW_FLAG_FREEZE) cfw_anim_freeze_all(L);
         for (uint32_t pos = ops; pos < blen; pos += cfw_op_len(body + pos, blen - pos)) cfw_op_apply(L, body + pos);
@@ -296,6 +436,8 @@ int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, ui
             L->settle_tag = *request;
             L->settle_pending = 1;
         }
+        if (ctx->evicted) ctx->epoch_revision++;
+        extra[0] = (uint8_t)(ctx->evicted > 255u ? 255u : ctx->evicted); *extra_len = 1;
         cfw_scene_render(ctx, L);
         cfw_anim_arm(ctx);
         return 1;
@@ -333,16 +475,17 @@ static uint32_t blit_image(customCfwContext *ctx, const uint8_t *img, uint32_t l
     if (!iw || !ih) return 0;
     uint32_t rowbytes = (iw + 1u) / 2u;
     uint32_t need = rowbytes * ih;
-    uint32_t scratch = (ctx->store_used + 15u) & ~15u;
-    if (scratch + need > CFW_STORE_BYTES) return 0;
+    uint32_t scratch = store_alloc(ctx, need);       /* transient decode buffer */
+    if (scratch == 0xffffffffu) return 0;
     uint8_t *dst = ctx->store + scratch;
     cfw_zero(dst, need);
     rle_state rs;
     rle_init(&rs, dst, rowbytes, rowbytes, ih);
     rle_feed(&rs, img + 2, len - 2);
-    if (rs.err) return 0;
-    blit_rows(ctx, dst, iw, ih, rowbytes, x, y, gray);
-    return iw;
+    uint32_t out = 0;
+    if (!rs.err) { blit_rows(ctx, dst, iw, ih, rowbytes, x, y, gray); out = iw; }
+    store_free(ctx, scratch, need);
+    return out;
 }
 
 static void draw_image(customCfwContext *ctx, cfw_object *o) {
