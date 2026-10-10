@@ -584,9 +584,18 @@ int cfw_uplink_push(customCfwContext *ctx, const uint8_t *data, uint8_t len);
 void cfw_uplink_flush(customCfwContext *ctx);
 void cfw_control(customCfwContext *ctx, uint8_t ctrl, uint8_t arg);
 
+static inline const char *fw_i18n_get_text(void *i18n, const char *key) {
+    return FW(const char *(*)(void *, const char *), FWA_i18n_get_text)(i18n, key);
+}
+static inline const char *fw_i18n_text_for_language(void *i18n, const char *lang, const char *key) {
+    return FW(const char *(*)(void *, const char *, const char *), FWA_i18n_text_for_language)(i18n, lang, key);
+}
 /* hint.c */
 const char *cfw_disconnect_hint(void *i18n, const char *key);
 void cfw_hint_unregistered(void *i18n, void *label, const char *key);
+void cfw_bond_name_label(void *label, const char *name);
+const char *cfw_bond_language(void *self);
+const char *cfw_bond_text(void *i18n, const char *key);
 
 /* disp.c */
 void cfw_display_probe(customCfwContext *ctx, uint8_t mode);

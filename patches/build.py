@@ -89,6 +89,8 @@ FW_SYMBOLS = [
     ("input_register_wheel", "rayneo::service::launcher::InputEventMonitor::registerRawWheelListener", None),
     ("input_unregister_wheel", "rayneo::service::launcher::InputEventMonitor::unregisterRawWheelListener", None),
     ("btn_register", "rayneo_register_btn_event_interceptor", None),
+    ("i18n_get_text", "rayneo::manager::I18nManager::GetText", 0x107D9FF1),   # (this, key) overload
+    ("i18n_text_for_language", "rayneo::manager::I18nManager::GetTextForLanguage", None),
     ("ancs_notification_handler",
      "rayneo::service::notification::NotificationMessageHandler::handleAncsNotificationReceived", 0x107029D1),
     ("rnlink_paired_status", "real_get_rnlink_paired_status", None),
@@ -132,9 +134,26 @@ LCDC_STOCK_TARGET = 0x10754035
 # Connect screen (hint.c): inside DisconnectView::ensureHintLabel, the
 # `bl I18nManager::GetText` that fetches the hint text and the
 # `bl I18nManager::RegisterLabel` that would let a language change rewrite it.
+I18N_GET_TEXT = 0x107D9FF1
+I18N_REGISTER_LABEL = 0x107DA601
 HINT_SITES = [
-    (0x10794C2A, 0x107D9FF1, "cfw_disconnect_hint", "DisconnectView::ensureHintLabel: bl I18nManager::GetText -> cfw_disconnect_hint (connect screen text)"),
-    (0x10794C7E, 0x107DA601, "cfw_hint_unregistered", "DisconnectView::ensureHintLabel: bl I18nManager::RegisterLabel -> cfw_hint_unregistered (keep our text)"),
+    (0x10794C2A, I18N_GET_TEXT, "cfw_disconnect_hint", "DisconnectView::ensureHintLabel: bl I18nManager::GetText -> cfw_disconnect_hint (connect screen text)"),
+    (0x10794C7E, I18N_REGISTER_LABEL, "cfw_hint_unregistered", "DisconnectView::ensureHintLabel: bl I18nManager::RegisterLabel -> cfw_hint_unregistered (keep our text)"),
+    # SetupView::init: the pairing screen's four labels (hint1, hint2, hint3, disconnect)
+    (0x10841EE6, I18N_GET_TEXT, "cfw_disconnect_hint", "SetupView::init hint1: bl I18nManager::GetText -> cfw_disconnect_hint"),
+    (0x10841F42, I18N_REGISTER_LABEL, "cfw_hint_unregistered", "SetupView::init hint1: bl I18nManager::RegisterLabel -> cfw_hint_unregistered"),
+    (0x10841FE4, I18N_GET_TEXT, "cfw_disconnect_hint", "SetupView::init hint2: bl I18nManager::GetText -> cfw_disconnect_hint"),
+    (0x1084203C, I18N_REGISTER_LABEL, "cfw_hint_unregistered", "SetupView::init hint2: bl I18nManager::RegisterLabel -> cfw_hint_unregistered"),
+    (0x10842050, I18N_GET_TEXT, "cfw_disconnect_hint", "SetupView::init hint3: bl I18nManager::GetText -> cfw_disconnect_hint"),
+    (0x108420A8, I18N_REGISTER_LABEL, "cfw_hint_unregistered", "SetupView::init hint3: bl I18nManager::RegisterLabel -> cfw_hint_unregistered"),
+    (0x1084216A, I18N_GET_TEXT, "cfw_disconnect_hint", "SetupView::init disconnect: bl I18nManager::GetText -> cfw_disconnect_hint"),
+    (0x108421C4, I18N_REGISTER_LABEL, "cfw_hint_unregistered", "SetupView::init disconnect: bl I18nManager::RegisterLabel -> cfw_hint_unregistered"),
+    # BondView: the pairing screen's title shows the Bluetooth name; both label updates become ours
+    (0x1083F87C, 0x10600D01, "cfw_bond_name_label", "BondView::updateDeviceNameLabel: bl lv_label_set_text -> cfw_bond_name_label (title)"),
+    (0x1083F83C, 0x10600D01, "cfw_bond_name_label", "BondView::updateStep1GlassName: bl lv_label_set_text -> cfw_bond_name_label (title)"),
+    # BondView::getLocalizedText: no carousel language, English Glassly texts
+    (0x1083F904, 0x1083F8BD, "cfw_bond_language", "BondView::getLocalizedText: bl getActiveTextLanguage -> cfw_bond_language (no language carousel)"),
+    (0x1083F910, I18N_GET_TEXT, "cfw_bond_text", "BondView::getLocalizedText: bl I18nManager::GetText -> cfw_bond_text (English, Glassly wording)"),
 ]
 SHIM_ASSERTS = [
     (0x1075D03C, 0x1980FCD8),    # rayneo_intercept_btn_event's literal: the button interceptor list head (cfw.h BTN_LIST_HEAD)

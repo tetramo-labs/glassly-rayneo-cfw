@@ -330,9 +330,12 @@ In order:
    Q4 spans into a coverage row blended with the record's gray) and the
    g2flash shapes suite ported to tools/g2suite over the harness bridge
    (`rayneo-io bridge`): 43 cases, the same data and pipeline as on the G2.
-7. Connect screen text (hint.c, 2026-10-10): DisconnectView's hint label
-   reads "Glassly CFW v6 / Open the Glassly App to connect" through two
-   retargeted calls in ensureHintLabel (GetText, RegisterLabel).
+7. The glasses' own screens (hint.c, 2026-10-10): the pairing view's title
+   reads "RayNeo iO Glassly CFW v6" (BondView's two label updates) and its
+   four hints plus DisconnectView's hint are Glassly text in English (the
+   i18n GetText/RegisterLabel calls of those labels are retargeted; the stock
+   cycles every language while unpaired, so an English string patch would
+   not have covered it). Other keys fall through to the stock lookup.
 8. Page on wake (settings_ext wake takeover) via the display screen-state
    callbacks, if the launcher's idle gate allows an overlay there.
 8. Direct-framebuffer modes (3/6, mode-8 bundles, mode 36): natural once the
