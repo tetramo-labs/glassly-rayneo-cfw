@@ -666,37 +666,43 @@ static void make_lut(uint8_t options, uint8_t *lut) {
     }
 }
 
-/* Blit raw 4bpp rows (rowbytes per row, low nibble = left pixel) through the LUT. */
-static void blit_rows(customCfwContext *ctx, const uint8_t *rows, uint32_t iw, uint32_t ih, uint32_t rowbytes,
+/* Blit a 4bpp pixel stream of iw*ih pixels, rows unpadded, through the LUT.
+ * `hi_first`: the first pixel of each byte is the high nibble (the RLE
+ * decoder's layout, rle.c); the builtin font's raw rows are low nibble first
+ * (gen_font.py; its 12-px cell keeps rows byte-aligned). Until revision 7 this
+ * read every stream low nibble first and padded rows: cached images drew with
+ * each pixel pair swapped and odd widths drifted a pixel per row. */
+static void blit_rows(customCfwContext *ctx, const uint8_t *px, uint32_t iw, uint32_t ih, int hi_first,
                       int x, int y, const uint8_t *lut, int transparent) {
+    uint32_t n = 0;
     for (uint32_t j = 0; j < ih; j++) {
-        for (uint32_t i = 0; i < iw; i++) {
-            uint8_t b = rows[j * rowbytes + (i >> 1)];
-            uint8_t g = (i & 1) ? (b >> 4) : (b & 0x0f);
+        for (uint32_t i = 0; i < iw; i++, n++) {
+            uint8_t b = px[n >> 1];
+            uint8_t g = ((n & 1u) ^ (uint32_t)hi_first) ? (b >> 4) : (b & 0x0f);
             if (transparent && !g) continue;
             px_gray(ctx, x + (int)i, y + (int)j, (uint8_t)(lut[g] * 17u));
         }
     }
 }
 
-/* Blit one cached image `[w u8][h u8][4bpp RLE]` (len bytes) at (x, y):
- * decoded into a scratch region at the store tail (not persisted). Returns
- * the image width, 0 when it did not decode. */
+/* Blit one cached image `[w u8][h u8][4bpp RLE]` (len bytes) at (x, y): the
+ * RLE covers exactly w*h pixels with no row padding (G2CfwTextureCache), so it
+ * is decoded as one row into a scratch region at the store tail (not
+ * persisted). Returns the image width, 0 when it did not decode. */
 static uint32_t blit_image(customCfwContext *ctx, const uint8_t *img, uint32_t len, int x, int y, const uint8_t *lut, int transparent) {
     if (len < 2) return 0;
     uint32_t iw = img[0], ih = img[1];
     if (!iw || !ih) return 0;
-    uint32_t rowbytes = (iw + 1u) / 2u;
-    uint32_t need = rowbytes * ih;
+    uint32_t need = (iw * ih + 1u) / 2u;
     uint32_t scratch = store_alloc(ctx, need);       /* transient decode buffer */
     if (scratch == 0xffffffffu) return 0;
     uint8_t *dst = ctx->store + scratch;
     cfw_zero(dst, need);
     rle_state rs;
-    rle_init(&rs, dst, rowbytes, rowbytes, ih);
+    rle_init(&rs, dst, need, need, 1);
     rle_feed(&rs, img + 2, len - 2);
     uint32_t out = 0;
-    if (!rs.err) { blit_rows(ctx, dst, iw, ih, rowbytes, x, y, lut, transparent); out = iw; }
+    if (!rs.err) { blit_rows(ctx, dst, iw, ih, 1, x, y, lut, transparent); out = iw; }
     store_free(ctx, scratch, need);
     return out;
 }
@@ -728,8 +734,8 @@ static int draw_font_text(customCfwContext *ctx, const uint8_t *font, uint32_t f
         uint32_t w = font[off], h = font[off + 1];
         if (raw) {
             uint32_t rowbytes = (w + 1u) / 2u;
-            if (off + 2u + rowbytes * h > flen) return 0;
-            blit_rows(ctx, font + off + 2, w, h, rowbytes, x, y, lut, transparent);
+            if (off + 2u + rowbytes * h > flen || (w & 1u)) return 0;   /* raw rows: byte-aligned, low nibble first */
+            blit_rows(ctx, font + off + 2, w, h, 0, x, y, lut, transparent);
         } else {
             w = blit_image(ctx, font + off, flen - off, x, y, lut, transparent);
             if (!w) return 0;
