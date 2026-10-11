@@ -16,6 +16,7 @@
 #include "geom.c"
 #include "vector.c"
 #include "scene.c"
+#include "raster.c"
 #include "anim.c"
 #include "ident.c"
 #include "input.c"

@@ -40,6 +40,28 @@ AA55 frame  (phone BLE transport)  -> payload after the business byte
                            from the elapsed angle; other types refuse with reason 3)
                     A SHOW/HIDE repeating the last applied request id is acknowledged APPLIED without re-applying.
         39 HIDE     [39][epoch][request][flags][bg]   (bit2 TAG → SETTLED [request] right away)
+      the direct-framebuffer family (revision 7, raster.c; the G2 image-handler modes, no epoch/request header,
+      ACK/NACK only; drawn straight into the targeted lens canvases at 540x220, which the next SHOW/HIDE takes back):
+        6  RASTER_FULL  [6][rle]                                        the whole canvas
+        3  RASTER_BOX   [3][left/4][top/2][w/4][h/2][fid u16][rle]      one box; 0x83 = [L box 4 B][R box 4 B][fid][rle], same size,
+                                                                        each lens takes its own box (fid is ignored)
+        9  COPY         [9][sL sT sW sH dL dT dW dH u16]                rect copy (overlap-safe); 0x89 = [L set 16 B][R set 16 B]
+        15 TEXT         [15][x i16][y i16][opt][len][bytes]             builtin font (16 px Menlo, 12x20 cell, advance 10), y = line top;
+                                                                        bytes 1..31 adjust x by byte-11; len must cover the rest
+        19 DRAW_IMAGE   [19][asset u32][x i16][y i16][opt]              a complete IMAGE asset
+        20 DRAW_STRING  [20][font u32][x i16][y i16][opt][len][bytes]   a FONT asset (0 = builtin), ASCII 1..127
+        36 SHAPES       [36][count][records]                            shape records drawn at once (types 1..17; PATH refused);
+                                                                        every record is sized and its assets resolved first
+        8  BUNDLE       [8][count]{[len u16][segment]}                  segments: the modes above and 37..41, applied in order,
+                                                                        presented once; the last cache segment's REPLY is relayed;
+                                                                        a failing segment NACKs the bundle (earlier ones stay)
+        11 CLEANUP      [11]                                            release the raster, blank both lenses, drop the object cache
+                                                                        under a new epoch (the next cache message is STALE)
+      `opt` is the texture options byte. RLE = pixel nibbles top-down, left to right, runs crossing rows:
+      `[cnt<<4|c]` (1..15), `[c][cnt u8]` (1..255), `[c][00][cnt u16]`; the stream must cover the box exactly.
+      A raster message takes the canvas over from the retained scene (animations freeze, the active list empties,
+      a pending tag reports); the page lease is the framebuffer lease (a closed page NACKs, closing zeroes the
+      canvases). A malformed message is NACKed and may have painted part of the box: resend a keyframe after a NACK.
 ```
 
 Shape records (coords signed px on 540×180, clipped; `width` = stroke, byte 3): the 13 geometry types
@@ -71,7 +93,7 @@ ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/6"   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes)
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/7"   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes, bit 4 = raster family)
 PAGE  [13][state u8][reason u8]
 DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32]
 ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification relay, ancs.c)
@@ -85,11 +107,12 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
   frame's left and right SHOWs into one stream (ordinals 0 and 1) so both
   lenses apply them in the same handler call; each lens acks and replies to
   the record addressed to it.
-* IDENT: `ver=4`, `w=540`, `h=180`, `maxChunk=240`, `storeKiB=64`, `revision=4`,
-  `flags = 0x07` normally. Flag bits: **bit0** = zlib COMPRESSED records
+* IDENT: `ver=7`, `w=540`, `h=220`, `maxChunk=240`, `storeKiB=64`, `revision=7`,
+  `flags = 0x1F` normally. Flag bits: **bit0** = zlib COMPRESSED records
   accepted (the stock inflater is used); **bit1** = raw packets accepted on
   business 0xF0; **bit2** = the heap context existed when IDENT was built
-  (diagnostic; the phone only logs it).
+  (diagnostic; the phone only logs it); **bit3** = stereo (a scene per lens);
+  **bit4** = the direct-framebuffer family is accepted (revision 7).
 * DIAG is a diagnostics reply the phone logs. `source` 1 = sent directly from
   the RNLink RX callback (right after IDENT), 2 = queued from the LVGL message
   handler (proves the thread hop). `entry` is the module's RNLink registry

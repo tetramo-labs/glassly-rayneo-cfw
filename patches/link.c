@@ -177,9 +177,18 @@ static void cfw_record(customCfwContext *ctx, const uint8_t *wire, uint32_t tota
         uint16_t request = 0;
         uint8_t extra[REPLY_EXTRA_MAX];
         uint8_t extra_len = 0;
-        int handled = dlen >= 5 ? cfw_scene_message(ctx, L, data, dlen, &status, &request, first, extra, &extra_len) : 0;
+        int handled;
+        uint8_t reply_mode = data[0];
+        if (cfw_raster_mode(data[0])) {
+            /* the direct-framebuffer family: ACK/NACK only, plus the REPLY of a
+             * bundle's last cache segment (reply_mode 0 = none), as the G2 */
+            reply_mode = 0;
+            handled = cfw_raster_message(ctx, L, data, dlen, first, &reply_mode, &status, &request, extra, &extra_len);
+        } else {
+            handled = dlen >= 5 ? cfw_scene_message(ctx, L, data, dlen, &status, &request, first, extra, &extra_len) : 0;
+        }
         if (handled) {
-            send_reply(ctx, lb, data[0], request, status, ctx->stream.epoch, extra, extra_len);   /* the current epoch, as the G2 */
+            if (reply_mode) send_reply(ctx, lb, reply_mode, request, status, ctx->stream.epoch, extra, extra_len);   /* the current epoch, as the G2 */
             send_ack(ctx, lb, RPL_ACK, (uint16_t)dlen, crc);
         } else {
             send_ack(ctx, lb, RPL_NACK, (uint16_t)dlen, crc);

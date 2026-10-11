@@ -189,6 +189,7 @@ void cfw_disp_pass(int on) {
  * One request in flight at a time; the page timer re-arms a lost one. */
 void cfw_page_present(customCfwContext *ctx) {
     ctx->disp_dirty = 1;
+    if (ctx->disp_hold) return;                     /* a bundle presents once, at its end (raster.c) */
     if (!ctx->page_open || !ctx->disp_own || ctx->disp_pan_pending) return;
     if (!fw_fb_get_power()) return;                  /* panel off: the display thread would skip it anyway */
     uint8_t *d = disp_driver(0);

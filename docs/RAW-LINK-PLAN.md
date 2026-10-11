@@ -351,8 +351,15 @@ In order:
    state without blanking the panel, and `rayneo_fb_get_power` is a
    framebuffer flag, not the panel. The probe report's tail carries the
    page/wake flags and DISPLAY_PROBE mode 8 is the (ineffective) force-off.
-9. Direct-framebuffer modes (3/6, mode-8 bundles, mode 36): natural once the
-   present path is ours; enable when the phone starts selecting them.
+9. Direct-framebuffer modes: built (2026-10-11, raster.c, revision 7, IDENT
+   flag 0x10): the G2's modes 3/6 (RLE boxes and full frames, decoded as L8
+   runs into the lens canvases), 9 (rect copy), 15/19/20 (builtin text,
+   image asset, font-asset string), 36 (immediate shapes), 8 (bundles,
+   presented once) and 11 (cleanup) with the G2 wire formats at 540x220. A
+   raster message takes the canvas over from the scene as on the G2; the
+   page lease stands in for the G2's framebuffer lease. Host test:
+   tools/host/run_raster_tests.sh. The phone's RayNeo path still drives the
+   object cache only; its G2 raster encoders apply once given the IDENT size.
 10. Compass: built (2026-10-10, compass.c; the sensor-hub stream handler,
    integer tilt compensation, midpoint hard-iron, change-only COMPASS
    reports, raw records for calibration, the axis mapping selectable from the

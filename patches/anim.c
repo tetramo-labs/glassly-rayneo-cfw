@@ -339,7 +339,7 @@ void cfw_anim_tick(customCfwContext *ctx) {
     int moving = 0;
     for (unsigned e = 0; e < 2; e++) {
         cfw_lens *L = &ctx->lens[e];
-        if (!cfw_anim_any(L)) continue;
+        if (L->raster || !cfw_anim_any(L)) continue;
         int still = 0;
         for (uint32_t s = 0; s < steps; s++) { still = an_advance(L); if (!still) break; }
         if (still) moving = 1;

@@ -766,43 +766,140 @@ static void draw_text(customCfwContext *ctx, cfw_object *o) {
 }
 
 void cfw_scene_hide(customCfwContext *ctx, cfw_lens *L) {
+    L->raster = 0;
     if (L->canvas) cfw_zero(L->canvas, (uint32_t)CFW_W * CFW_H);
     cfw_page_present(ctx);
 }
 
+static void render_object(customCfwContext *ctx, cfw_object *o) {
+    if (!(o->flags & OBJ_VISIBLE)) return;
+    uint8_t gray = (uint8_t)(o->color & 0x0f);
+    switch (o->type) {
+    case SH_LINE: case SH_RECT: case SH_RECT_FILL: case SH_CIRCLE: case SH_CIRCLE_FILL:
+    case SH_TRI: case SH_TRI_FILL: case SH_QUAD: case SH_QUAD_FILL:
+    case SH_BEZIER2: case SH_BEZIER3: case SH_ARC: case SH_PIE:
+        ctx->draw_gray = (uint8_t)(gray * 17u);
+        if (cfw_vec_rotated(&o->rotation) && ctx->vector_work) cfw_vec_shape_draw(ctx, ctx->vector_work, o);
+        else cfw_geom_draw(ctx, o->type, o->width, o->p);
+        break;
+    case SH_PATH:
+        if (o->path_bytes && ctx->vector_work) {
+            ctx->draw_gray = (uint8_t)(gray * 17u);
+            cfw_vec_path_draw(ctx, ctx->vector_work, (const cfw_path *)(const void *)(ctx->store + o->path_off), o->p, &o->rotation);
+        }
+        break;
+    case SH_IMAGE:
+        draw_image(ctx, o);
+        break;
+    case SH_TEXT:
+    case SH_TEXT_INLINE:
+    case SH_TEXT_CACHED:
+        draw_text(ctx, o);
+        break;
+    default: break;
+    }
+}
+
 void cfw_scene_render(customCfwContext *ctx, cfw_lens *L) {
     if (!L->canvas) return;
+    L->raster = 0;                               /* the scene owns the canvas again */
     ctx->canvas_buf = L->canvas;
     memset(L->canvas, (uint8_t)(L->bg * 17u), (uint32_t)CFW_W * CFW_H);
-    for (uint16_t k = 0; k < L->active_count; k++) {
-        cfw_object *o = &L->objects[L->active_list[k]];
-        if (!(o->flags & OBJ_VISIBLE)) continue;
-        uint8_t gray = (uint8_t)(o->color & 0x0f);
-        switch (o->type) {
-        case SH_LINE: case SH_RECT: case SH_RECT_FILL: case SH_CIRCLE: case SH_CIRCLE_FILL:
-        case SH_TRI: case SH_TRI_FILL: case SH_QUAD: case SH_QUAD_FILL:
-        case SH_BEZIER2: case SH_BEZIER3: case SH_ARC: case SH_PIE:
-            ctx->draw_gray = (uint8_t)(gray * 17u);
-            if (cfw_vec_rotated(&o->rotation) && ctx->vector_work) cfw_vec_shape_draw(ctx, ctx->vector_work, o);
-            else cfw_geom_draw(ctx, o->type, o->width, o->p);
-            break;
-        case SH_PATH:
-            if (o->path_bytes && ctx->vector_work) {
-                ctx->draw_gray = (uint8_t)(gray * 17u);
-                cfw_vec_path_draw(ctx, ctx->vector_work, (const cfw_path *)(const void *)(ctx->store + o->path_off), o->p, &o->rotation);
-            }
-            break;
-        case SH_IMAGE:
-            draw_image(ctx, o);
-            break;
-        case SH_TEXT:
-        case SH_TEXT_INLINE:
-        case SH_TEXT_CACHED:
-            draw_text(ctx, o);
-            break;
-        default: break;
-        }
-    }
+    for (uint16_t k = 0; k < L->active_count; k++) render_object(ctx, &L->objects[L->active_list[k]]);
     ctx->canvas_buf = 0;
     cfw_page_present(ctx);
+}
+
+/* ---- immediate draws for the raster family (raster.c) ---------------------- */
+/* A raster message takes the canvas over from the scene, as on the G2
+ * (scene.c raster takeover): animations freeze, the active list empties (the
+ * objects stay cached), a pending tag reports, and nothing re-renders the
+ * canvas until the next SHOW/HIDE. */
+void cfw_scene_takeover(customCfwContext *ctx, cfw_lens *L) {
+    cfw_anim_freeze_all(L);
+    for (uint32_t i = 0; i < L->active_count; i++) L->objects[L->active_list[i]].active = 0;
+    L->active_count = 0;
+    L->last_show_valid = 0;
+    cfw_anim_settled(ctx, L);
+    L->raster = 1;
+}
+
+/* Byte length of one shape record at rec (mode 36 lists them back to back),
+ * 0 when it cannot be sized within `avail`; PATH is not allowed there. */
+int cfw_scene_record_len(const uint8_t *rec, uint32_t avail) {
+    if (avail < 1) return 0;
+    uint8_t type = rec[0];
+    uint32_t rlen;
+    if (type >= SH_LINE && type <= SH_PIE) rlen = 20;
+    else if (type == SH_IMAGE || type == SH_TEXT) rlen = 12;
+    else if (type == SH_TEXT_CACHED) rlen = 16;
+    else if (type == SH_TEXT_INLINE) { if (avail < 13) return 0; rlen = 13u + rec[12]; if (!rec[12] || rec[12] > 128) return 0; }
+    else return 0;
+    return rlen <= avail ? (int)rlen : 0;
+}
+
+/* The record's assets must be resident and complete before anything draws. */
+int cfw_scene_record_check(customCfwContext *ctx, const uint8_t *rec, uint32_t len) {
+    if (cfw_scene_record_len(rec, len) != (int)len) return 0;
+    uint8_t type = rec[0];
+    if (type == SH_IMAGE || type == SH_TEXT || type == SH_TEXT_CACHED) {
+        cfw_asset *a = asset_find(ctx, rd32(rec + 8));
+        if (!a || !(a->state & 1) || a->kind != (type == SH_IMAGE ? ASSET_IMAGE : ASSET_STRING)) return 0;
+        if (type == SH_TEXT_CACHED) {
+            uint32_t font = rd32(rec + 12);
+            if (font) { cfw_asset *f = asset_find(ctx, font); if (!f || !(f->state & 1) || f->kind != ASSET_FONT) return 0; }
+        }
+    }
+    return 1;
+}
+
+void cfw_scene_record_draw(customCfwContext *ctx, cfw_lens *L, const uint8_t *rec, uint32_t len) {
+    if (!L->canvas) return;
+    ctx->canvas_buf = L->canvas;
+    if (rec[0] == SH_TEXT_INLINE) {
+        /* straight from the record: no store round trip */
+        uint8_t lut[16];
+        make_lut(rec[2], lut);
+        draw_font_text(ctx, font_builtin, FONT_BUILTIN_BYTES, 1, rec + 13, rec[12], rds16(rec + 4), rds16(rec + 6), lut, (rec[2] & TEX_OPT_TRANSPARENT) != 0);
+    } else {
+        cfw_object o;
+        cfw_zero(&o, sizeof o);
+        o.flags = OBJ_VISIBLE;
+        if (shape_into(ctx, &o, rec, len) > 0) render_object(ctx, &o);
+    }
+    ctx->canvas_buf = 0;
+}
+
+/* Mode 19: an image asset at (x, y) with the texture options. 0 = no such asset. */
+int cfw_scene_draw_image_asset(customCfwContext *ctx, cfw_lens *L, uint32_t asset, int x, int y, uint8_t opt) {
+    cfw_asset *a = asset_find(ctx, asset);
+    if (!a || !(a->state & 1) || a->kind != ASSET_IMAGE || a->length < 2 || !L->canvas) return 0;
+    uint8_t lut[16];
+    make_lut(opt, lut);
+    ctx->canvas_buf = L->canvas;
+    uint32_t w = blit_image(ctx, ctx->store + a->offset, a->length, x, y, lut, (opt & TEX_OPT_TRANSPARENT) != 0);
+    ctx->canvas_buf = 0;
+    a->last_use = ++ctx->use_clock;
+    return w != 0;
+}
+
+/* Modes 15 and 20: `n` bytes of text with a font asset (0 = the builtin
+ * font) at (x, y). 0 = no such font or a glyph the font lacks. */
+int cfw_scene_draw_string(customCfwContext *ctx, cfw_lens *L, uint32_t font, int x, int y, uint8_t opt, const uint8_t *str, uint32_t n) {
+    if (!L->canvas) return 0;
+    uint8_t lut[16];
+    make_lut(opt, lut);
+    int transparent = (opt & TEX_OPT_TRANSPARENT) != 0;
+    int ok;
+    ctx->canvas_buf = L->canvas;
+    if (font) {
+        cfw_asset *f = asset_find(ctx, font);
+        if (!f || !(f->state & 1) || f->kind != ASSET_FONT) { ctx->canvas_buf = 0; return 0; }
+        ok = draw_font_text(ctx, ctx->store + f->offset, f->length, 0, str, n, x, y, lut, transparent);
+        f->last_use = ++ctx->use_clock;
+    } else {
+        ok = draw_font_text(ctx, font_builtin, FONT_BUILTIN_BYTES, 1, str, n, x, y, lut, transparent);
+    }
+    ctx->canvas_buf = 0;
+    return ok;
 }

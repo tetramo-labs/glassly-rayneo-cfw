@@ -552,6 +552,142 @@ final class Suite {
             try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 1_000_000_000))
             return "three draws applied, fade settled"
         },
+
+        // MARK: raster (revision 7): the direct-framebuffer family, G2 wire formats at 540x220
+        Case(id: "raster-full", group: "raster", title: "mode 6: a full-canvas RLE frame (gray 4 field) is ACKed by every lens (revision 7, visible)") { s in
+            try s.requireRaster()
+            s.watcher.clear()
+            var m = Data([6]); m.append(s.rleRuns([(4, 540 * 220)]))
+            try s.sendMessage(m, compress: false)
+            try await s.rasterAcked("full frame")
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 500_000_000))
+            return "applied"
+        },
+        Case(id: "raster-box", group: "raster", title: "mode 0x83: a stereo box, 64x32 gray 15 at x 40 (left) and x 80 (right), on the gray field (visible)") { s in
+            try s.requireRaster()
+            s.watcher.clear()
+            var m = Data([0x83, 10, 10, 16, 16, 20, 10, 16, 16, 0, 0]); m.append(s.rleRuns([(15, 64 * 32)]))
+            try s.sendMessage(m, compress: false)
+            try await s.rasterAcked("stereo box")
+            s.watcher.clear()
+            var bad = Data([0x83, 10, 10, 16, 16, 20, 10, 17, 16, 0, 0]); bad.append(s.rleRuns([(15, 64 * 32)]))
+            try s.sendMessage(bad, compress: false)
+            let a = try await s.ack(timeout: 3)
+            guard !a.success else { throw SuiteError.failed("boxes of different sizes were ACKed") }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 500_000_000))
+            return "box applied, mismatched boxes NACKed"
+        },
+        Case(id: "raster-copy", group: "raster", title: "mode 0x89: the box copied 80 rows down in each lens (visible)") { s in
+            try s.requireRaster()
+            s.watcher.clear()
+            var m = Data([0x89])
+            for v: Int16 in [40, 20, 64, 32, 40, 100, 64, 32, 80, 20, 64, 32, 80, 100, 64, 32] { m.append(s.le16(v)) }
+            try s.sendMessage(m, compress: false)
+            try await s.rasterAcked("copy")
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 500_000_000))
+            return "applied"
+        },
+        Case(id: "raster-text", group: "raster", title: "mode 15: builtin-font text at (150,160) (visible)") { s in
+            try s.requireRaster()
+            s.watcher.clear()
+            let text = Array("Glassly raster".utf8)
+            var m = Data([15]); m.append(s.le16(150)); m.append(s.le16(160)); m.append(0x0F); m.append(UInt8(text.count)); m.append(contentsOf: text)
+            try s.sendMessage(m, compress: false)
+            try await s.rasterAcked("text")
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 500_000_000))
+            return "applied"
+        },
+        Case(id: "raster-image", group: "raster", title: "mode 19: an uploaded image asset drawn at (300,100) transparent; an unknown asset is NACKed (visible)") { s in
+            try s.requireRaster()
+            s.watcher.clear()
+            var pixels: [UInt8] = []
+            for y in 0 ..< 24 { for x in 0 ..< 32 { pixels.append((x / 8 + y / 8) % 2 == 0 ? 15 : 0) } }
+            var put = s.header(37, epoch: s.epoch)
+            put.append(s.putAsset(id: 94, version: 1, kind: 0, data: s.rleImage(pixels, width: 32, height: 24)))
+            try s.sendMessage(put, compress: false)
+            let a = try await s.cacheReply(timeout: 3)
+            guard a.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed("asset: \(a.summary)") }
+            s.watcher.clear()
+            var m = Data([19]); m.append(s.le32(94)); m.append(s.le16(300)); m.append(s.le16(100)); m.append(0x1F)
+            try s.sendMessage(m, compress: false)
+            try await s.rasterAcked("image draw")
+            s.watcher.clear()
+            var bad = Data([19]); bad.append(s.le32(95)); bad.append(s.le16(300)); bad.append(s.le16(100)); bad.append(0x0F)
+            try s.sendMessage(bad, compress: false)
+            let n = try await s.ack(timeout: 3)
+            guard !n.success else { throw SuiteError.failed("an unknown asset was ACKed") }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 500_000_000))
+            return "drawn, unknown asset NACKed"
+        },
+        Case(id: "raster-shapes", group: "raster", title: "mode 36: a stroked rect and an inline text drawn at once; a PATH record is refused (visible)") { s in
+            try s.requireRaster()
+            s.watcher.clear()
+            var m = Data([36, 2])
+            m.append(s.rectRecord(filled: false, x: 380, y: 20, w: 120, h: 60, gray: 15))
+            m.append(s.textRecord(x: 390, y: 40, w: 100, h: 20, text: "shapes"))
+            try s.sendMessage(m, compress: false)
+            try await s.rasterAcked("shapes")
+            s.watcher.clear()
+            var bad = Data([36, 1, 18, 0, 15, 0]); bad.append(s.le16(0)); bad.append(s.le16(0)); bad.append(s.le16(256)); bad.append(s.le16(1)); bad.append(0)
+            try s.sendMessage(bad, compress: false)
+            let n = try await s.ack(timeout: 3)
+            guard !n.success else { throw SuiteError.failed("a PATH record was ACKed") }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 500_000_000))
+            return "drawn, PATH NACKed"
+        },
+        Case(id: "raster-bundle", group: "raster", title: "mode 8: a bundle of full black, text and a filled rect lands as one frame (visible)") { s in
+            try s.requireRaster()
+            s.watcher.clear()
+            var full = Data([6]); full.append(s.rleRuns([(0, 540 * 220)]))
+            let text = Array("bundle".utf8)
+            var t = Data([15]); t.append(s.le16(200)); t.append(s.le16(90)); t.append(0x0F); t.append(UInt8(text.count)); t.append(contentsOf: text)
+            var r = Data([36, 1]); r.append(s.rectRecord(filled: true, x: 60, y: 60, w: 100, h: 80, gray: 9))
+            var m = Data([8, 3])
+            for seg in [full, t, r] { m.append(s.le16(Int16(seg.count))); m.append(seg) }
+            try s.sendMessage(m, compress: true)
+            try await s.rasterAcked("bundle")
+            s.watcher.clear()
+            var nested = Data([8, 1]); nested.append(s.le16(2)); nested.append(contentsOf: [8, 0])
+            try s.sendMessage(nested, compress: false)
+            let n = try await s.ack(timeout: 3)
+            guard !n.success else { throw SuiteError.failed("a nested bundle was ACKed") }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 500_000_000))
+            return "applied, nested bundle NACKed"
+        },
+        Case(id: "raster-malformed", group: "raster", title: "mode 6 with a stream short of the canvas is NACKed by every lens") { s in
+            try s.requireRaster()
+            s.watcher.clear()
+            var m = Data([6]); m.append(s.rleRuns([(7, 1000)]))
+            try s.sendMessage(m, compress: false)
+            _ = try await s.ack(timeout: 3)
+            guard s.watcher.acks.allSatisfy({ !$0.success }) else { throw SuiteError.failed("a short stream was ACKed") }
+            return "NACKed"
+        },
+        Case(id: "raster-then-show", group: "raster", title: "a SHOW after a raster frame takes the canvas back (scene rect replaces the bundle; visible)") { s in
+            try s.requireRaster()
+            s.watcher.clear()
+            let put = s.putObject(id: 96, version: 1, record: s.rectRecord(filled: true, x: 220, y: 70, w: 100, h: 80, gray: 15))
+            try s.sendMessage(s.showMessage(puts: [put], refs: [(96, 1)]), compress: false)
+            let r = try await s.cacheReply(timeout: 3)
+            guard r.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed(r.summary) }
+            try? await Task.sleep(nanoseconds: UInt64(s.options.showHold * 500_000_000))
+            return "scene back"
+        },
+        Case(id: "raster-cleanup", group: "raster", title: "mode 11 blanks and drops the cache: the old epoch is STALE, a RESET starts over") { s in
+            try s.requireRaster()
+            s.watcher.clear()
+            try s.sendMessage(Data([11]), compress: false)
+            try await s.rasterAcked("cleanup")
+            s.watcher.clear()
+            try s.sendMessage(s.stateMessage(epoch: s.epoch, revision: 0, page: 0), compress: false)
+            let st = try await s.cacheReply(timeout: 3)
+            guard st.status == G2CfwTransport.CacheReply.stale else { throw SuiteError.failed("after cleanup: \(st.summary)") }
+            s.watcher.clear()
+            try s.sendMessage(s.resetMessage(), compress: false)
+            let r = try await s.cacheReply(timeout: 3)
+            guard r.status == G2CfwTransport.CacheReply.applied else { throw SuiteError.failed("reset: \(r.summary)") }
+            return "stale, then reset"
+        },
         Case(id: "hide", group: "scene", title: "HIDE clears the page") { s in
             s.watcher.clear()
             try s.sendMessage(s.hideMessage(epoch: s.epoch), compress: false)
@@ -808,6 +944,33 @@ final class Suite {
         r.append(UInt8(bytes.count))
         r.append(contentsOf: bytes)
         return r
+    }
+
+    private func requireRaster() throws {
+        guard let ident = watcher.lastIdent else { throw SuiteError.skipped("no IDENT") }
+        guard ident.revision >= 7, ident.flags & 0x10 != 0 else { throw SuiteError.skipped("needs revision 7 with the raster flag, glasses run \(ident.revision) flags \(ident.flags)") }
+    }
+
+    /// RLE tokens for runs of (gray, count) pixels, counts split past 65535.
+    private func rleRuns(_ runs: [(UInt8, Int)]) -> Data {
+        var out = Data()
+        for (c, total) in runs {
+            var n = total
+            while n > 0 {
+                let k = min(n, 65535)
+                if k <= 15 { out.append(UInt8(k << 4) | (c & 15)) }
+                else if k <= 255 { out.append(c & 15); out.append(UInt8(k)) }
+                else { out.append(c & 15); out.append(0); out.append(UInt8(k & 0xFF)); out.append(UInt8(k >> 8)) }
+                n -= k
+            }
+        }
+        return out
+    }
+
+    /// A raster message is answered with an ACK per lens and no REPLY.
+    private func rasterAcked(_ what: String) async throws {
+        _ = try await ack(timeout: 4)
+        if let bad = watcher.acks.first(where: { !$0.success }) { throw SuiteError.failed("\(what): NACK from lens \(bad.lens)") }
     }
 
     private func requireVector() throws {

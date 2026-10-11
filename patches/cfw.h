@@ -172,9 +172,9 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 6u
-#define REV_TEXT  "6"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
-#define REV_STRING "GLASSLYCFW-IO/6"
+#define REV_MAJOR 7u
+#define REV_TEXT  "7"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
+#define REV_STRING "GLASSLYCFW-IO/7"
 #define MAX_CHUNK 240u
 #define STORE_KIB 64u
 /* IDENT flags: bit0 = zlib COMPRESSED records accepted; bit1 = raw stream packets
@@ -184,7 +184,8 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define IDENT_FLAG_RAW_0XF0 0x02u
 #define IDENT_FLAG_CONTEXT  0x04u
 #define IDENT_FLAG_STEREO   0x08u  /* two lens scenes: records carry a lens mask (revision 5) */
-#define IDENT_FLAGS         (IDENT_FLAG_ZLIB | IDENT_FLAG_RAW_0XF0 | IDENT_FLAG_STEREO)
+#define IDENT_FLAG_RASTER   0x10u  /* the direct-framebuffer family (modes 3/6/8/9/11/15/19/20/36, raster.c; revision 7) */
+#define IDENT_FLAGS         (IDENT_FLAG_ZLIB | IDENT_FLAG_RAW_0XF0 | IDENT_FLAG_STEREO | IDENT_FLAG_RASTER)
 #define RAW_MAX_BYTES 4096u        /* one frame payload: [opt][stream][chunk <= MAX_CHUNK] */
 #define CFW_STORE_BYTES (STORE_KIB * 1024u)
 
@@ -224,6 +225,18 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define MSG_HIDE  39u
 #define MSG_SHOW  38u
 #define MSG_STATE 40u   /* [40][epoch][revision u32][page u16]: UNCHANGED / DELTA / SNAPSHOT (G2 scene.c) */
+/* the direct-framebuffer family (raster.c, revision 7): the G2 image-handler
+ * modes, drawn straight into the lens canvases; no epoch/request header */
+#define MSG_RASTER_BOX   3u   /* [3][l/4][t/2][w/4][h/2][fid u16][rle]; 0x83 = [Lbox][Rbox] */
+#define MSG_RASTER_FULL  6u   /* [6][rle] whole canvas */
+#define MSG_BUNDLE       8u   /* [8][count]{[len u16][segment]}: apply all, present once */
+#define MSG_COPY         9u   /* [9][sL sT sW sH dL dT dW dH u16]; 0x89 = [L set][R set] */
+#define MSG_CLEANUP     11u   /* [11]: release the raster, blank, drop the cache */
+#define MSG_TEXT_BUILTIN 15u  /* [15][x i16][y i16][opt][len][utf-8] builtin font */
+#define MSG_DRAW_IMAGE  19u   /* [19][asset u32][x i16][y i16][opt] */
+#define MSG_DRAW_STRING 20u   /* [20][font u32][x i16][y i16][opt][len][bytes] */
+#define MSG_SHAPES      36u   /* [36][count][records] immediate shapes (no PATH) */
+#define MSG_LENSES_DIFFER 0x80u /* bit 7 of modes 3 and 9: a box/set per lens */
 /* CONTROL (41) sub-commands: [41][epoch][request][sub]... */
 #define CTL_RESET  0u   /* [cap]  drop everything, adopt `epoch` */
 #define CTL_DROP   1u   /* [n][id u32 x n]  drop inactive objects (an active one refuses) */
@@ -448,6 +461,7 @@ typedef struct {
     uint16_t active_list[CACHE_OBJECTS];
     uint16_t active_count;
     uint8_t bg;                    /* background gray of the last SHOW */
+    uint8_t raster;                /* a raster frame owns the canvas: nothing re-renders it until a SHOW/HIDE (raster.c) */
     uint8_t last_show_valid;
     uint8_t settle_pending;        /* a tagged SHOW has not reported SETTLED yet */
     uint16_t settle_tag;
@@ -471,6 +485,7 @@ typedef struct {
     volatile uint8_t disp_dirty;   /* eye buffers need (re)composing on the display thread */
     volatile uint8_t disp_pattern; /* compose the probe's diagnostic images instead of the scenes */
     volatile uint8_t disp_pan_pending; /* a present request is queued at the display thread */
+    uint8_t disp_hold;             /* presents deferred (a bundle in progress): the canvas stays dirty */
     uint32_t disp_pan_tick;
     uint8_t page_open;
     uint8_t screen_cb_registered; /* page.c: the display manager's screen-state callback is ours too */
@@ -610,11 +625,23 @@ void cfw_scene_reset(customCfwContext *ctx, uint8_t cap);
 int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len,
                       uint8_t *status, uint16_t *request, int first, uint8_t *extra, uint8_t *extra_len);
 cfw_object *object_find(cfw_lens *L, uint32_t id);
+/* immediate draws for the raster family (raster.c); all draw into L->canvas */
+void cfw_scene_takeover(customCfwContext *ctx, cfw_lens *L);
+int cfw_scene_record_len(const uint8_t *rec, uint32_t avail);
+int cfw_scene_record_check(customCfwContext *ctx, const uint8_t *rec, uint32_t len);
+void cfw_scene_record_draw(customCfwContext *ctx, cfw_lens *L, const uint8_t *rec, uint32_t len);
+int cfw_scene_draw_image_asset(customCfwContext *ctx, cfw_lens *L, uint32_t asset, int x, int y, uint8_t opt);
+int cfw_scene_draw_string(customCfwContext *ctx, cfw_lens *L, uint32_t font, int x, int y, uint8_t opt, const uint8_t *str, uint32_t n);
 uint16_t rd16(const uint8_t *p);
 uint32_t rd32(const uint8_t *p);
 
 /* geom.c */
 void cfw_geom_draw(customCfwContext *ctx, uint8_t type, uint8_t width, const int16_t *params);
+
+/* raster.c */
+int cfw_raster_mode(uint8_t mode);
+int cfw_raster_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len, int first,
+                       uint8_t *reply_mode, uint8_t *status, uint16_t *request, uint8_t *extra, uint8_t *extra_len);
 
 /* link.c */
 int cfw_uplink_push(customCfwContext *ctx, const uint8_t *data, uint8_t len);
