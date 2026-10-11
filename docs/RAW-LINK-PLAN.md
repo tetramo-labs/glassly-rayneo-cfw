@@ -358,8 +358,12 @@ In order:
    presented once) and 11 (cleanup) with the G2 wire formats at 540x220. A
    raster message takes the canvas over from the scene as on the G2; the
    page lease stands in for the G2's framebuffer lease. Host test:
-   tools/host/run_raster_tests.sh. The phone's RayNeo path still drives the
-   object cache only; its G2 raster encoders apply once given the IDENT size.
+   tools/host/run_raster_tests.sh. The phone's RayNeo driver sends all-image
+   frames through it (the G2's rule): the G2 renderer's helpers take a panel
+   (640x480 on the G2, the 540x220 canvas here), a keyframe is a mode-6
+   canvas, later frames are mode-3/9 deltas in a mode-8 bundle, and the
+   scene is re-SHOWn when it takes the panel back. tools/g2suite/raster-replay.ts
+   replays the phone encoder's own messages from the Mac.
 10. Compass: built (2026-10-10, compass.c; the sensor-hub stream handler,
    integer tilt compensation, midpoint hard-iron, change-only COMPASS
    reports, raw records for calibration, the axis mapping selectable from the
