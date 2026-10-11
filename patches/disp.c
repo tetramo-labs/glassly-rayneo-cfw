@@ -198,6 +198,7 @@ void cfw_page_present(customCfwContext *ctx) {
     if (fd < 0) return;
     ctx->disp_pan_pending = 1;
     ctx->disp_pan_tick = fw_tick();
+    ctx->pan_requests++;
     (void)fw_ioctl(fd, FBIO_PAN, d + FBD_PINFO);
     (void)fw_ioctl(fd, FBIO_COMMIT, 0);
 }
@@ -225,6 +226,7 @@ void cfw_lcdc_hook(void *src, void *area, uint32_t c, uint32_t flag, void *depth
         lcdc[LCDC_KIND] = 3;
         lcdc[LCDC_COMPOSED] = 1;
         fw_lcdc_update_self();
+        ctx->presented++;
         ctx->disp_pan_pending = 0;
         return;
     }

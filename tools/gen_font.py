@@ -1,70 +1,100 @@
 #!/usr/bin/env python3
 """Generate patches/font_builtin.h: the module's builtin bitmap font for
-TEXT(15) and TEXT_INLINE(17) records, drawn by scene.c without LVGL.
+TEXT(15), TEXT_INLINE(17) and mode-15 strings, drawn by scene.c without LVGL.
 
-Layout mirrors the cached-font asset the phone can PUT (G2 texture_cache.h),
-so one blit path serves both: `[96 x u32 offsets][glyph images]`, offsets
-relative to the table start (0 = glyph missing), each glyph `[w u8][h u8]`
-followed by raw 4-bit rows ((w+1)/2 bytes per row, low nibble = left pixel).
-Builtin glyphs are stored raw, not RLE, so no decoder scratch is needed.
+The G2 draws inline text with its stock proportional 20 px LVGL face, so the
+builtin font is SF Pro Regular at 20 px (the Mac's system face), anti-aliased
+to 4 bits, covering printable Latin-1 (U+0020..U+007E, U+00A0..U+00FF; the
+phone sends UTF-8, scene.c decodes the two-byte sequences), with the face's
+pair kerning baked in. Layout (offsets relative to the blob start):
+
+    [224 x u32 glyph offsets]      code - 0x20 indexes it; 0 = no glyph
+    [kern count u16][count x (a u8, b u8, delta i8)]   sorted by (a, b), Latin-1 codes
+    glyphs: [w u8][h u8][advance u8][raw 4-bit rows]   (w+1)/2 bytes per row,
+                                                       low nibble = left pixel, w even
+
+Every glyph image is CELL_H rows tall with the baseline at ASCENT, drawn 1 px
+in from its left edge (negative left bearings keep their pixels), so a line
+of text is placed by its top-left corner and the line pitch is CELL_H.
 
 Deterministic for a given font file and size; the output is committed.
 """
-import sys, os
+import os
 from PIL import Image, ImageDraw, ImageFont
 
-FONT = "/System/Library/Fonts/Menlo.ttc"
-SIZE = 16          # Menlo at 16 px: ~10 px advance, 20 px line (the G2 builtin is 20 px)
-CELL_H = 20
+FONT = "/System/Library/Fonts/SFNS.ttf"
+VARIATION = "Regular"
+SIZE = 20          # em size; caps are 14 px, line (ascent + descent) 25 px
+FIRST, LAST = 0x20, 0xFF
+CODES = [c for c in range(FIRST, LAST + 1) if c <= 0x7E or c >= 0xA0]
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "patches", "font_builtin.h")
 
 
 def main():
     font = ImageFont.truetype(FONT, SIZE, index=0)
+    font.set_variation_by_name(VARIATION)
     ascent, descent = font.getmetrics()
-    advance = int(round(font.getlength("M")))
-    glyphs = []
-    for code in range(32, 128):
+    cell_h = ascent + descent
+    glyphs = {}
+    for code in CODES:
         ch = chr(code)
-        img = Image.new("L", (advance + 2, CELL_H), 0)
-        d = ImageDraw.Draw(img)
-        # baseline so that ascent+descent fits the 20 px cell
-        top = (CELL_H - (ascent + descent)) // 2
-        d.text((1, top), ch, font=font, fill=255)
-        w, h = img.size
+        adv = font.getlength(ch)
+        advance = max(1, int(round(adv)))
+        left, _, right, _ = font.getbbox(ch)
+        # the image holds the ink plus a 1 px lead-in; even width for byte-aligned rows
+        w = max(advance, right) + 2
+        w += w & 1
+        img = Image.new("L", (w, cell_h), 0)
+        ImageDraw.Draw(img).text((1, 0), ch, font=font, fill=255)
         rows = []
-        for y in range(h):
-            row = bytearray((w + 1) // 2)
+        for y in range(cell_h):
+            row = bytearray(w // 2)
             for x in range(w):
-                # crisp 1-bit glyphs: antialiased edges read as blur on the coarse panel
-                v = 15 if img.getpixel((x, y)) >= 128 else 0
+                v = img.getpixel((x, y)) >> 4
                 if x & 1:
                     row[x >> 1] |= v << 4
                 else:
                     row[x >> 1] |= v
             rows.append(bytes(row))
-        glyphs.append((w, h, b"".join(rows)))
+        glyphs[code] = bytes([w, cell_h, advance]) + b"".join(rows)
 
-    table = bytearray(96 * 4)
+    kerns = []
+    letters = [c for c in CODES if c > 0x20 and c != 0xA0]
+    adv = {c: font.getlength(chr(c)) for c in letters}
+    for a in letters:
+        for b in letters:
+            delta = int(round(font.getlength(chr(a) + chr(b)) - adv[a] - adv[b]))
+            if delta and -128 <= delta <= 127:
+                kerns.append((a, b, delta))
+    kerns.sort()
+
+    table = bytearray((LAST - FIRST + 1) * 4)
+    kern = bytearray(len(kerns).to_bytes(2, "little"))
+    for a, b, delta in kerns:
+        kern += bytes([a, b, delta & 0xFF])
     body = bytearray()
-    for i, (w, h, px) in enumerate(glyphs):
-        off = 96 * 4 + len(body)
-        table[i * 4:i * 4 + 4] = off.to_bytes(4, "little")
-        body += bytes([w, h]) + px
-    blob = bytes(table + body)
+    base = len(table) + len(kern)
+    for code in CODES:
+        off = base + len(body)
+        i = (code - FIRST) * 4
+        table[i:i + 4] = off.to_bytes(4, "little")
+        body += glyphs[code]
+    blob = bytes(table + kern + body)
 
     with open(OUT, "w") as f:
-        f.write("/* GENERATED by tools/gen_font.py: %s @ %d px, cell %dx%d, %d glyphs, %d bytes.\n"
-                " * [96 x u32 offsets][glyph [w][h][raw 4bpp rows]], see scene.c draw_font_text. */\n"
-                % (os.path.basename(FONT), SIZE, advance + 2, CELL_H, len(glyphs), len(blob)))
+        f.write("/* GENERATED by tools/gen_font.py: %s %s @ %d px, line %d px (ascent %d), %d glyphs, %d kerning pairs, %d bytes.\n"
+                " * [224 x u32 offsets][kern count u16][a b delta ...][glyph [w][h][adv][raw 4bpp rows]], see scene.c draw_font_text. */\n"
+                % (os.path.basename(FONT), VARIATION, SIZE, cell_h, ascent, len(glyphs), len(kerns), len(blob)))
         f.write("#define FONT_BUILTIN_BYTES %du\n" % len(blob))
-        f.write("#define FONT_BUILTIN_ADVANCE %du\n" % advance)
-        f.write("#define FONT_BUILTIN_HEIGHT %du\n" % CELL_H)
+        f.write("#define FONT_BUILTIN_CHARS %du\n" % (LAST - FIRST + 1))
+        f.write("#define FONT_BUILTIN_KERN_OFF %du\n" % len(table))
+        f.write("#define FONT_BUILTIN_HEIGHT %du\n" % cell_h)
+        f.write("#define FONT_BUILTIN_ASCENT %du\n" % ascent)
         f.write("static const uint8_t font_builtin[%d] = {\n" % len(blob))
         for i in range(0, len(blob), 24):
             f.write("    " + ",".join("0x%02x" % b for b in blob[i:i + 24]) + ",\n")
         f.write("};\n")
-    print("wrote %s: %d glyphs, advance %d, %d bytes" % (OUT, len(glyphs), advance, len(blob)))
+    print("wrote %s: %d glyphs, line %d px, %d kerning pairs, %d bytes" % (OUT, len(glyphs), cell_h, len(kerns), len(blob)))
 
 
 if __name__ == "__main__":

@@ -21,6 +21,8 @@ static uint32_t cfw_ident_fill(uint8_t *b, uint8_t flags) {
     cfw_put16(p, REV_MAJOR); p += 2;      /* revision */
     *p++ = flags;
     for (unsigned i = 0; i < sizeof(name) - 1; i++) *p++ = (uint8_t)name[i];
+    *p++ = 0;                         /* revision 8: the name ends, then */
+    *p++ = cfw_font_line_height();    /* the builtin font's line pitch (px) */
     return (uint32_t)(p - b);
 }
 

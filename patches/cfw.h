@@ -172,9 +172,9 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 7u
-#define REV_TEXT  "7"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
-#define REV_STRING "GLASSLYCFW-IO/7"
+#define REV_MAJOR 8u
+#define REV_TEXT  "8"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
+#define REV_STRING "GLASSLYCFW-IO/8"
 #define MAX_CHUNK 240u
 #define STORE_KIB 64u
 /* IDENT flags: bit0 = zlib COMPRESSED records accepted; bit1 = raw stream packets
@@ -366,7 +366,9 @@ typedef struct {
  * handler. The first one that registers is used (a taken id is refused with -3). */
 #define UI_MODULE_FIRST  5u
 #define UI_MODULE_SECOND 3u
-#define UPLINK_MIN_GAP_MS 25u      /* per-lens REPLY+ACK: four replies per SHOW since revision 5 */
+/* Replies leave as soon as they are queued (revision 8, as the G2 sends them
+ * inline): the whole queue drains after each packet and on every page tick.
+ * Revisions 5-7 spaced them 25 ms apart, 100 ms+ per stereo SHOW. */
 #define UPLINK_MAX 192u
 #define CROWN_PER_DETENT 600       /* raw wheel units per detent */
 #define LONG_CLOSE_MS 2000u        /* a >2s press closes the page locally */
@@ -446,7 +448,7 @@ typedef struct {
     uint16_t ordinal;              /* per-stream message counter, echoed in replies */
 } cfw_stream;
 
-/* queued uplink payload (<=192 B), drained one-at-a-time >=100 ms apart */
+/* queued uplink payload (<=192 B), drained in order (link.c cfw_uplink_flush) */
 #define UPLINK_QUEUE 8u
 typedef struct { uint8_t len; uint8_t data[UPLINK_MAX]; } cfw_uplink;
 
@@ -522,6 +524,16 @@ typedef struct {
     uint32_t anim_last_tick;       /* last frame advanced (page timer drives frames) */
     uint8_t anim_active;
     uint8_t anim_period_ms;        /* CONTROL sub 2; 0 = CFW_ANIM_PERIOD_MS */
+    /* the running animation's statistics, reported in SETTLED (revision 8):
+     * page ticks seen, frames advanced, lens renders, present requests, frames
+     * the display thread presented, the longest render and the longest gap
+     * between ticks (ms) */
+    uint32_t anim_started, anim_prev_tick;
+    uint16_t anim_ticks, anim_steps, anim_renders;
+    uint16_t anim_pan_base, anim_presented_base;
+    uint8_t anim_render_max_ms, anim_gap_max_ms;
+    uint16_t pan_requests;         /* presents asked of the display thread (page.c) */
+    volatile uint16_t presented;   /* frames the display hook presented (disp.c, display thread) */
 
     /* uplink pacing */
     cfw_uplink uplink[UPLINK_QUEUE];
@@ -632,6 +644,7 @@ int cfw_scene_record_check(customCfwContext *ctx, const uint8_t *rec, uint32_t l
 void cfw_scene_record_draw(customCfwContext *ctx, cfw_lens *L, const uint8_t *rec, uint32_t len);
 int cfw_scene_draw_image_asset(customCfwContext *ctx, cfw_lens *L, uint32_t asset, int x, int y, uint8_t opt);
 int cfw_scene_draw_string(customCfwContext *ctx, cfw_lens *L, uint32_t font, int x, int y, uint8_t opt, const uint8_t *str, uint32_t n);
+uint8_t cfw_font_line_height(void);   /* the builtin font's line pitch, advertised in IDENT */
 uint16_t rd16(const uint8_t *p);
 uint32_t rd32(const uint8_t *p);
 

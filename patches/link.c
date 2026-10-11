@@ -14,9 +14,10 @@
  * DIAG) right there, then validates, deep-copies and enqueues every packet to
  * the LVGL thread through message_processor_send (module 5, or 3 if 5 is
  * taken; ids must be 1..15 and a taken id is refused without side effects).
- * All packet parsing, LVGL mutation and queued uplink run on the LVGL thread,
- * one reply at a time, >= 100 ms apart, <= 192 bytes. The UPLINK uses
- * rnlink_if_send_payload(0xF0, ...).
+ * All packet parsing, LVGL mutation and queued uplink run on the LVGL thread;
+ * replies (<= 192 bytes) go out in order as soon as they are queued, after
+ * the packet that produced them (revision 8; the G2 sends its inline too).
+ * The UPLINK uses rnlink_if_send_payload(0xF0, ...).
  */
 #include "cfw.h"
 
@@ -75,7 +76,7 @@ static int inflate_record(customCfwContext *ctx, const uint8_t *in, uint32_t n,
     return 1;
 }
 
-/* ---- uplink queue (drained one-at-a-time, >=100 ms apart, <=192 B) --------- */
+/* ---- uplink queue (drained in order after each packet and each page tick) ---- */
 int cfw_uplink_push(customCfwContext *ctx, const uint8_t *data, uint8_t len) {
     if (len > UPLINK_MAX) return 0;
     uint8_t nxt = (uint8_t)((ctx->uplink_tail + 1) % UPLINK_QUEUE);
@@ -87,13 +88,11 @@ int cfw_uplink_push(customCfwContext *ctx, const uint8_t *data, uint8_t len) {
 }
 
 void cfw_uplink_flush(customCfwContext *ctx) {
-    if (ctx->uplink_head == ctx->uplink_tail) return;
-    uint32_t now = fw_tick();
-    if (ctx->last_uplink_tick && (now - ctx->last_uplink_tick) < UPLINK_MIN_GAP_MS) return;
-    cfw_uplink *u = &ctx->uplink[ctx->uplink_head];
-    if (fw_send(BIZ_GLASSLY, u->data, u->len, 0) == 0) {
+    while (ctx->uplink_head != ctx->uplink_tail) {
+        cfw_uplink *u = &ctx->uplink[ctx->uplink_head];
+        if (fw_send(BIZ_GLASSLY, u->data, u->len, 0) != 0) return;   /* link busy: the next tick retries */
         ctx->uplink_head = (uint8_t)((ctx->uplink_head + 1) % UPLINK_QUEUE);
-        ctx->last_uplink_tick = now;
+        ctx->last_uplink_tick = fw_tick();
     }
 }
 

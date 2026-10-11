@@ -304,11 +304,25 @@ void cfw_anim_freeze_all(cfw_lens *L) {
 }
 
 /* ---- settle + timer -------------------------------------------------------- */
-/* SETTLED per lens, as each G2 lens reports its own. */
+/* SETTLED per lens, as each G2 lens reports its own. Revision 8 appends the
+ * animation's statistics: [elapsed ms u16][ticks u16][frames u16][renders u16]
+ * [pan requests u16][presented u16][render max ms u8][tick gap max ms u8]. */
 void cfw_anim_settled(customCfwContext *ctx, cfw_lens *L) {
     if (!L->settle_pending) return;
     L->settle_pending = 0;
-    uint8_t b[3] = {RPL_SETTLED, (uint8_t)L->settle_tag, (uint8_t)(L->settle_tag >> 8)};
+    uint32_t elapsed = ctx->anim_started ? fw_tick() - ctx->anim_started : 0;
+    uint16_t pans = (uint16_t)(ctx->pan_requests - ctx->anim_pan_base);
+    uint16_t presented = (uint16_t)(ctx->presented - ctx->anim_presented_base);
+    uint8_t b[17];
+    b[0] = RPL_SETTLED; b[1] = (uint8_t)L->settle_tag; b[2] = (uint8_t)(L->settle_tag >> 8);
+    cfw_put16(b + 3, elapsed > 0xFFFFu ? 0xFFFFu : elapsed);
+    cfw_put16(b + 5, ctx->anim_ticks);
+    cfw_put16(b + 7, ctx->anim_steps);
+    cfw_put16(b + 9, ctx->anim_renders);
+    cfw_put16(b + 11, pans);
+    cfw_put16(b + 13, presented);
+    b[15] = ctx->anim_render_max_ms;
+    b[16] = ctx->anim_gap_max_ms;
     cfw_uplink_push(ctx, b, sizeof(b));
 }
 
@@ -331,11 +345,16 @@ void cfw_anim_tick(customCfwContext *ctx) {
     uint32_t now = fw_tick();
     uint32_t period = ctx->anim_period_ms ? ctx->anim_period_ms : CFW_ANIM_PERIOD_MS;
     if (!ctx->anim_last_tick) ctx->anim_last_tick = now;
+    if (ctx->anim_ticks < 0xFFFFu) ctx->anim_ticks++;
+    uint32_t gap = ctx->anim_prev_tick ? now - ctx->anim_prev_tick : 0;
+    ctx->anim_prev_tick = now;
+    if (gap > ctx->anim_gap_max_ms) ctx->anim_gap_max_ms = gap > 255u ? 255u : (uint8_t)gap;
     uint32_t elapsed = now - ctx->anim_last_tick;
     if (elapsed < period) return;
     uint32_t steps = elapsed / period;
     if (steps > ANIM_CATCH_UP) { steps = ANIM_CATCH_UP; ctx->anim_last_tick = now - period * ANIM_CATCH_UP; }
     ctx->anim_last_tick += steps * period;
+    ctx->anim_steps = (uint16_t)(ctx->anim_steps + steps);
     int moving = 0;
     for (unsigned e = 0; e < 2; e++) {
         cfw_lens *L = &ctx->lens[e];
@@ -343,7 +362,11 @@ void cfw_anim_tick(customCfwContext *ctx) {
         int still = 0;
         for (uint32_t s = 0; s < steps; s++) { still = an_advance(L); if (!still) break; }
         if (still) moving = 1;
+        uint32_t t0 = fw_tick();
         cfw_scene_render(ctx, L);
+        uint32_t took = fw_tick() - t0;
+        if (took > ctx->anim_render_max_ms) ctx->anim_render_max_ms = took > 255u ? 255u : (uint8_t)took;
+        ctx->anim_renders++;
         if (!cfw_anim_any(L)) cfw_anim_settled(ctx, L);
     }
     if (!moving) cfw_anim_stop(ctx);
@@ -358,6 +381,14 @@ void cfw_anim_arm(customCfwContext *ctx) {
         if (cfw_anim_any(L)) any = 1; else cfw_anim_settled(ctx, L);
     }
     if (!any) { cfw_anim_stop(ctx); return; }
-    if (!ctx->anim_active) ctx->anim_last_tick = fw_tick();
+    if (!ctx->anim_active) {
+        ctx->anim_last_tick = fw_tick();
+        ctx->anim_started = ctx->anim_last_tick;
+        ctx->anim_prev_tick = 0;
+        ctx->anim_ticks = ctx->anim_steps = ctx->anim_renders = 0;
+        ctx->anim_render_max_ms = ctx->anim_gap_max_ms = 0;
+        ctx->anim_pan_base = ctx->pan_requests;
+        ctx->anim_presented_base = ctx->presented;
+    }
     ctx->anim_active = 1;
 }

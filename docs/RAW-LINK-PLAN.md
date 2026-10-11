@@ -384,6 +384,26 @@ In order:
    0xF0 record (COMPASS `[kind][heading u16 deci-degrees][accuracy u8]`),
    phone side like the G2 compass reports. `process_compass_info` is the
    factory self-test parser, not this path.
+11. Revision 8 (2026-10-11): the builtin font is SF Pro Regular 20 px,
+    proportional, 4-bit anti-aliased, printable Latin-1 with the face's pair
+    kerning (tools/gen_font.py, 38 KB; scene.c decodes the strings' UTF-8
+    two-byte sequences, anything else draws '?'), so inline text reads like
+    the G2's stock face; IDENT ends the name with a NUL and advertises the
+    font's line pitch (25 px), which the phone's scene encoder uses instead
+    of the G2's 27 px rows. Replies leave inline, in order, as soon as they
+    are queued (no 25 ms gap; a stereo SHOW's four replies used to cost
+    100 ms+). SETTLED carries the animation's statistics (ticks, frames,
+    renders, present requests, presented frames, longest render, longest
+    tick gap; tools/g2suite/anim-timing.ts prints them). Verified on
+    hardware: Swift suite 50/50, shapes 43/43, vector 23/23, cache-state
+    10/10. **Open: animations run slow** because the page timer (an LVGL
+    timer, 25 ms) only fires when the stock UI loop iterates, which during
+    an animation is once per present, about every 190 ms, and the catch-up
+    cap of 4 frames per tick cannot cover that: a 60-frame glide over one
+    disc settled in 3.4 s (18 ticks, 35 renders, longest render 26 ms), and
+    a scene with eight text lines renders at 255 ms+ per lens. Next: drive
+    the frame loop from a source that wakes the UI thread every period, and
+    cut the text render cost (the font blit sets pixels one call at a time).
 Not applicable: mic routing, R1 ring, ALS, BLE link profile, the Cordio
 keyboard bridge, the protobuf settings channel (business 0xF0 and the stock
 inflater replace them).

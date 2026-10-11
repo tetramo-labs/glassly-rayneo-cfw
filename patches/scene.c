@@ -6,9 +6,10 @@
  * fonts, strings) live in the shared store, objects and the active set are
  * per lens. Each lens renders into its own 540x220 L8 canvas with 16 gray
  * levels; disp.c converts the canvases to the LCDC's 4-bit eye buffers on the
- * display thread. Text is drawn from the builtin bitmap font (font_builtin.h,
- * TEXT(15) and TEXT_INLINE(17)) or a cached font asset (TEXT_CACHED(16)); no
- * LVGL object is involved anywhere here.
+ * display thread. Text is drawn from the builtin bitmap font (font_builtin.h:
+ * SF Pro 20 px, proportional, kerned, Latin-1; TEXT(15) and TEXT_INLINE(17))
+ * or a cached font asset (TEXT_CACHED(16)); no LVGL object is involved
+ * anywhere here.
  */
 #include "cfw.h"
 #include "rle.h"
@@ -669,7 +670,7 @@ static void make_lut(uint8_t options, uint8_t *lut) {
 /* Blit a 4bpp pixel stream of iw*ih pixels, rows unpadded, through the LUT.
  * `hi_first`: the first pixel of each byte is the high nibble (the RLE
  * decoder's layout, rle.c); the builtin font's raw rows are low nibble first
- * (gen_font.py; its 12-px cell keeps rows byte-aligned). Until revision 7 this
+ * (gen_font.py; even glyph widths keep rows byte-aligned). Until revision 7 this
  * read every stream low nibble first and padded rows: cached images drew with
  * each pixel pair swapped and odd widths drifted a pixel per row. */
 static void blit_rows(customCfwContext *ctx, const uint8_t *px, uint32_t iw, uint32_t ih, int hi_first,
@@ -715,32 +716,70 @@ static void draw_image(customCfwContext *ctx, cfw_object *o) {
     blit_image(ctx, ctx->store + a->offset, a->length, o->p[0], o->p[1], lut, (o->color & TEX_OPT_TRANSPARENT) != 0);
 }
 
-/* A font table `[96 x u32 offsets][glyph images]` (G2 texture_cache.h): draw
- * `n` bytes of `str` glyph by glyph. Bytes 1..31 are kerning (x += byte - 11);
- * 32..127 index the table. Cached-font glyphs are RLE images, the builtin
- * font's are raw rows (font_builtin.h). 1 when drawn, 0 on a bad table. */
+/* Draw `n` bytes of `str` glyph by glyph with a font table. A cached font
+ * (G2 texture_cache.h) is `[96 x u32 offsets][RLE glyph images]` for ASCII
+ * 32..127, x advancing by the image width. The builtin font (font_builtin.h,
+ * `raw`) is `[224 x u32 offsets][kerning pairs][glyph [w][h][adv][raw rows]]`
+ * for Latin-1 0x20..0xFF: the string's UTF-8 two-byte sequences decode to
+ * Latin-1, any other non-ASCII character draws '?', x advances by the glyph's
+ * advance plus the face's pair kerning, as the G2's stock font does. Bytes
+ * 1..31 are explicit kerning (x += byte - 11). 1 when drawn, 0 on a bad table. */
 #define FONT_TABLE_CHARS 96u
-#define FONT_TABLE_BYTES (FONT_TABLE_CHARS * 4u)
+
+uint8_t cfw_font_line_height(void) { return (uint8_t)FONT_BUILTIN_HEIGHT; }
+
+static int builtin_kern(uint32_t a, uint32_t b) {
+    const uint8_t *k = font_builtin + FONT_BUILTIN_KERN_OFF;
+    uint32_t lo = 0, hi = rd16(k), key = (a << 8) | b;
+    k += 2;
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2u;
+        uint32_t cur = ((uint32_t)k[mid * 3u] << 8) | k[mid * 3u + 1u];
+        if (cur == key) return (int)(int8_t)k[mid * 3u + 2u];
+        if (cur < key) lo = mid + 1u; else hi = mid;
+    }
+    return 0;
+}
+
+/* The next character of a builtin-font string as a Latin-1 code, `*i` moved
+ * past its UTF-8 bytes; a sequence outside Latin-1 (or a stray continuation
+ * byte) is '?'. */
+static uint32_t builtin_next(const uint8_t *str, uint32_t n, uint32_t *i) {
+    uint32_t ch = str[(*i)++];
+    if (ch < 0x80u) return ch;
+    uint32_t extra = ch >= 0xF0u ? 3u : ch >= 0xE0u ? 2u : ch >= 0xC0u ? 1u : 0u;
+    uint32_t code = '?';
+    if ((ch == 0xC2u || ch == 0xC3u) && *i < n && (str[*i] & 0xC0u) == 0x80u) code = ((ch & 0x1Fu) << 6) | (str[*i] & 0x3Fu);
+    while (extra-- && *i < n && (str[*i] & 0xC0u) == 0x80u) (*i)++;
+    return code;
+}
+
 static int draw_font_text(customCfwContext *ctx, const uint8_t *font, uint32_t flen, int raw,
                           const uint8_t *str, uint32_t n, int x, int y, const uint8_t *lut, int transparent) {
-    if (flen < FONT_TABLE_BYTES) return 0;
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t ch = str[i];
+    uint32_t chars = raw ? (uint32_t)FONT_BUILTIN_CHARS : FONT_TABLE_CHARS;
+    if (flen < chars * 4u) return 0;
+    uint32_t prev = 0;
+    for (uint32_t i = 0; i < n;) {
+        uint32_t ch = raw ? builtin_next(str, n, &i) : str[i++];
         if (ch == 0) break;
-        if (ch <= 31u) { x += (int)ch - 11; continue; }
-        if (ch > 127u) ch = '?';
+        if (ch <= 31u) { x += (int)ch - 11; prev = 0; continue; }
+        if (ch >= 32u + chars) ch = '?';
         uint32_t off = rd32(font + (ch - 32u) * 4u);
-        if (off == 0 || off + 2u > flen) return 0;
+        if (off == 0 && ch != '?') { ch = '?'; off = rd32(font + (ch - 32u) * 4u); }   /* no glyph (0x80..0x9F) */
+        if (off == 0 || off + 3u > flen) return 0;
         uint32_t w = font[off], h = font[off + 1];
         if (raw) {
             uint32_t rowbytes = (w + 1u) / 2u;
-            if (off + 2u + rowbytes * h > flen || (w & 1u)) return 0;   /* raw rows: byte-aligned, low nibble first */
-            blit_rows(ctx, font + off + 2, w, h, 0, x, y, lut, transparent);
+            if (off + 3u + rowbytes * h > flen || (w & 1u)) return 0;   /* raw rows: byte-aligned, low nibble first */
+            if (prev) x += builtin_kern(prev, ch);
+            blit_rows(ctx, font + off + 3, w, h, 0, x, y, lut, transparent);
+            x += (int)font[off + 2];
+            prev = ch;
         } else {
             w = blit_image(ctx, font + off, flen - off, x, y, lut, transparent);
             if (!w) return 0;
+            x += (int)w;
         }
-        x += (int)w;
     }
     return 1;
 }

@@ -46,7 +46,7 @@ AA55 frame  (phone BLE transport)  -> payload after the business byte
         3  RASTER_BOX   [3][left/4][top/2][w/4][h/2][fid u16][rle]      one box; 0x83 = [L box 4 B][R box 4 B][fid][rle], same size,
                                                                         each lens takes its own box (fid is ignored)
         9  COPY         [9][sL sT sW sH dL dT dW dH u16]                rect copy (overlap-safe); 0x89 = [L set 16 B][R set 16 B]
-        15 TEXT         [15][x i16][y i16][opt][len][bytes]             builtin font (16 px Menlo, 12x20 cell, advance 10), y = line top;
+        15 TEXT         [15][x i16][y i16][opt][len][bytes]             builtin font (SF Pro 20 px, proportional + kerned, Latin-1 via UTF-8, 25 px line since revision 8), y = line top;
                                                                         bytes 1..31 adjust x by byte-11; len must cover the rest
         19 DRAW_IMAGE   [19][asset u32][x i16][y i16][opt]              a complete IMAGE asset
         20 DRAW_STRING  [20][font u32][x i16][y i16][opt][len][bytes]   a FONT asset (0 = builtin), ASCII 1..127
@@ -86,14 +86,14 @@ asset = `[w u8][h u8][4bpp RLE]`; RLE tokens `[cnt<<4|c]`, `[c][cnt u8]`,
 `[c][00][cnt u16]`. `ops` are always empty on RayNeo; no warm-up SHOW/TWEEN is
 sent — the first cache message after RESET is a real PUT or SHOW.
 
-## Replies (glasses → phone, business 0xF0, ≤192 B, one at a time ≥100 ms apart; kind bytes in hex: IDENT is 0x11, PAGE 0x13, DIAG 0x15)
+## Replies (glasses → phone, business 0xF0, ≤192 B, in order as soon as they are queued since revision 8; kind bytes in hex: IDENT is 0x11, PAGE 0x13, DIAG 0x15)
 
 ```
 ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/7"   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes, bit 4 = raster family)
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/8"[00][lineHeight u8]   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes, bit 4 = raster family; the NUL and the builtin font's line pitch in px follow the name since revision 8)
 PAGE  [13][state u8][reason u8]
 DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32]
 ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification relay, ancs.c)
@@ -128,10 +128,14 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
   only after a QUERY on this connection; a notification that does not fit the
   free uplink slots is dropped whole. Testable only from an iPhone (macOS has
   no ANCS server).
-* SETTLED `[09][tag u16 LE]`: the request id of a TAG-flagged SHOW (or HIDE)
-  once every animation it started has ended, immediately when none did. The
-  frame timer runs at 33 ms (`CFW_ANIM_PERIOD_MS`); easing is a cubic bezier
-  `x1 y1 x2 y2` in /255, Q15 math as on the G2.
+* SETTLED `[09][tag u16 LE][elapsed ms u16][ticks u16][frames u16][renders u16][pans u16][presented u16][renderMax ms u8][tickGapMax ms u8]`:
+  the request id of a TAG-flagged SHOW (or HIDE) once every animation it
+  started has ended, immediately when none did, followed (revision 8) by the
+  animation's statistics: page ticks seen, frames advanced, lens renders,
+  present requests, frames the display thread presented, the longest render
+  and the longest gap between page ticks. The frame timer runs at 33 ms
+  (`CFW_ANIM_PERIOD_MS`); easing is a cubic bezier `x1 y1 x2 y2` in /255, Q15
+  math as on the G2.
 * REPLY `status`: 0 APPLIED, 1 STALE (epoch mismatch), 2 MISSING (unknown id/ver),
   3 CAPACITY, 4 REFUSED [reason: 2 path commands, 3 op target, 4 tween mask/value,
   5 DROP of an active object, 6 edge budget], 5 UNCHANGED, 6 DELTA, 7 SNAPSHOT,
@@ -177,8 +181,8 @@ The firmware receives frames through an RNLink callback table it registers for
 business 0xF0 at launcher start (see `docs/HOOKS.md`); the stock file transfer
 is not involved. Revision 1's named-file downlink no longer exists.
 
-Replies: business 0xF0 via `rnlink_if_send_payload`, ≤ 192 B, one at a time
-≥ 100 ms apart, drained by the module's 100 ms LVGL timer, which the first
-handled packet creates. IDENT and the first DIAG bypass the queue: they are
+Replies: business 0xF0 via `rnlink_if_send_payload`, ≤ 192 B, queued in order
+and drained right after the packet that produced them and on every 25 ms page
+tick (revision 8; revisions 5-7 spaced them 25 ms apart, earlier ones 100 ms). IDENT and the first DIAG bypass the queue: they are
 sent from the RX callback itself (the stock RX path sends its own
 acknowledgements from that context through the same protocol layer).
