@@ -325,7 +325,8 @@ In order:
    nor pinned by the SHOW being applied), MISSING id lists, the [evicted]
    and RESET [evicted][store KiB] reply extras. The journal (STATE: UNCHANGED /
    DELTA / SNAPSHOT, DROP, PERIOD) followed on 2026-10-10 (revision 6, a
-   64-entry ring per lens, asset events in both). Still open: texture options.
+   64-entry ring per lens, asset events in both) and the texture options on
+   2026-10-10 (inverse/transparent/ink through a LUT, colour tweens fade).
    Also built: anti-aliased geometry (geom.c: four sub-rows per pixel row,
    Q4 spans into a coverage row blended with the record's gray) and the
    g2flash shapes suite ported to tools/g2suite over the harness bridge
