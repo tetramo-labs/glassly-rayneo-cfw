@@ -36,7 +36,7 @@ PATCH_JSON="patches/cfw_patches.json"
 CFW_AP="build/nuttx_ap.cfw.bin"
 CFW_ZIP="build/rayneo-io-glassly-cfw-1.0.4.12.ota.zip"
 STOCK_OUT_ZIP="build/rayneo-io-stock-1.0.4.12.ota.zip"
-REVISION="GLASSLYCFW-IO/5"
+REVISION=$(sed -n 's/^#define REV_STRING "\(.*\)"/\1/p' "$(dirname "$0")/patches/cfw.h")   # pins.json: the module's IDENT name
 
 SKIP_VENV=0; FORCE_DOWNLOAD=0; UPDATE_PATCHES=0
 for arg in "$@"; do
