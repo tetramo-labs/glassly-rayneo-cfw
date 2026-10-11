@@ -25,10 +25,10 @@
  * rebuild. The RayNeo iO's (2026-10-10, worn): +x up (the accelerometer
  * reads +g there, tilted 26 degrees toward +y), +y forward (a nod down
  * pitches +y below the horizon and spins +z positive, so +z is left), a turn
- * to the right spins the vertical axis negative (a right-handed IMU frame)
- * yet moved the field-derived heading the wrong way through a full turn and
- * through a 90 degree one: the magnetometer's frame is mirrored against the
- * IMU's, so the device map is forward +y with the mirror bit (0xa0). */
+ * to the right spins the vertical axis negative (a right-handed frame) and
+ * raises the heading with forward +y and no mirror (checked live through the
+ * control byte: 0x21 read 226 -> 326 -> 230 degrees on a right turn and
+ * back, 0xa1 the mirror image), so the device map is 0x20. */
 #include "cfw.h"
 
 /* ---- float bits -> fixed point ------------------------------------------- */
@@ -84,7 +84,7 @@ static uint32_t cp_atan2_deci(int32_t y, int32_t x) {
 #define CP_ACCEL_SCALE 1000
 #define CP_GYRO_SCALE  100
 #define CP_MAG_SCALE   100
-#define COMPASS_DEVICE_MAP 0xa0u  /* forward +y, mirrored: see the header comment */
+#define COMPASS_DEVICE_MAP 0x20u  /* forward +y: see the header comment */
 #define CP_SPAN_MIN    1500          /* 15 uT: an axis counts for accuracy past this */
 #define CP_SPAN_GOOD   3000          /* 30 uT */
 

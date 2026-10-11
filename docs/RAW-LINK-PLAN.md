@@ -357,8 +357,9 @@ In order:
    reports, raw records for calibration, the axis mapping selectable from the
    control byte). The device's mapping was read off the raw stream on
    hardware (2026-10-10, worn: +x up tilted 26 degrees toward +y, +y forward,
-   +z left; the magnetometer's frame is mirrored against the IMU's) and is the
-   device default (0xa0). The hard-iron estimate is the min/max midpoint since
+   +z left, a right turn raises the heading) and is the device default
+   (0x20); a mirrored first guess from a poorly fitted hard iron was caught
+   by switching maps live through the control byte. The hard-iron estimate is the min/max midpoint since
    the stream started, so a session that begins near a magnet (a laptop)
    skews it until the wearer looks around. Background: the hardware has a TDK IMU plus a
    magnetometer on the sensor-hub core, reported to the AP over rpmsg

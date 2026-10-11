@@ -10,7 +10,7 @@ iO and for the Even Realities G2 CFW. Panel is 540×180, single display, 1-bit
 ```
 AA55 frame  (phone BLE transport)  -> payload after the business byte
   packets          [opt u8][stream u8][chunk]  (3.1)   opt: 0x01 LENS, 0x80 RESET, 0x40 END, 0x10 CONTROL
-    control        [0x10][stream][ctrl u8][arg u8]  (3.2)   1 QUERY 2 PAGE_OPEN 3 PAGE_CLOSE 4 KEEPALIVE 6 COMPASS(arg: bits 0-1 = 0 stop / 1 headings / 2 headings + raw records, high nibble = axis mapping, 0 = the device's own (RayNeo iO: forward +y, mirrored = 0xa0): bits 4-5 forward axis 1 x 2 y 3 z, bit 6 negate, bit 7 mirror; revision 6, compass.c) 5 DISPLAY_PROBE(arg = mode; mode 8 = screen_power_force_off, the report ends in [fb power][page open][own][dirty][pan pending][takeover][screen cb][screen on]; revision 5 tooling)
+    control        [0x10][stream][ctrl u8][arg u8]  (3.2)   1 QUERY 2 PAGE_OPEN 3 PAGE_CLOSE 4 KEEPALIVE 6 COMPASS(arg: bits 0-1 = 0 stop / 1 headings / 2 headings + raw records, high nibble = axis mapping, 0 = the device's own (RayNeo iO: forward +y = 0x20): bits 4-5 forward axis 1 x 2 y 3 z, bit 6 negate, bit 7 mirror; revision 6, compass.c) 5 DISPLAY_PROBE(arg = mode; mode 8 = screen_power_force_off, the report ends in [fb power][page open][own][dirty][pan pending][takeover][screen cb][screen on]; revision 5 tooling)
     record stream  [flags][len u16 LE][crc u16 LE][body]   (3.3 L1)
       flags: bits 0-1 lens targets (0x01 left, 0x02 right, 0x03 both; revision 5 keeps a scene per lens, before only 0x01), 0x04 COMPRESSED (zlib SYNC_FLUSH, body ends 00 00 FF FF), 0x08 RESET_CONTEXT
       crc = CRC-16/CCITT-FALSE(poly 0x1021, init 0xFFFF) of the DECODED message
