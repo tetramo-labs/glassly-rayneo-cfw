@@ -172,9 +172,9 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 8u
-#define REV_TEXT  "8"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
-#define REV_STRING "GLASSLYCFW-IO/8"
+#define REV_MAJOR 9u
+#define REV_TEXT  "9"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
+#define REV_STRING "GLASSLYCFW-IO/9"
 #define MAX_CHUNK 240u
 #define STORE_KIB 64u
 /* IDENT flags: bit0 = zlib COMPRESSED records accepted; bit1 = raw stream packets
@@ -241,6 +241,10 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define CTL_RESET  0u   /* [cap]  drop everything, adopt `epoch` */
 #define CTL_DROP   1u   /* [n][id u32 x n]  drop inactive objects (an active one refuses) */
 #define CTL_PERIOD 2u   /* [ms]  animation frame period 10..250 */
+#define CTL_TUNING 3u   /* [mask] revision 9 experiments: TUNE_* bits, 0 = defaults */
+#define TUNE_PRESENT_GATED 0x01u  /* refuse presents while the framebuffer power flag reads 0 (the revision 5-8 behaviour) */
+#define TUNE_NO_WAKE       0x02u  /* do not wake the UI thread from the display hook after a present */
+#define TUNE_RENDER_ALWAYS 0x04u  /* render every frame even while a present is still pending */
 /* PUT entry kinds */
 #define PUT_ASSET  0x00u
 #define PUT_OBJECT 0x01u
@@ -459,6 +463,14 @@ typedef struct { uint8_t len; uint8_t data[UPLINK_MAX]; } cfw_uplink;
 typedef struct {
     uint8_t bit;                   /* LENS_LEFT / LENS_RIGHT */
     uint8_t *canvas;               /* L8 CFW_W x CFW_H; UI thread draws, display thread converts */
+    /* static-layer cache (revision 9): the objects before the first animating
+     * one in z order, rendered once per scene change into `base`, so an
+     * animation frame costs a copy plus the moving objects */
+    uint8_t *base;                 /* L8 CFW_W x CFW_H, NULL when the heap had none (full renders) */
+    uint8_t base_valid;
+    uint16_t base_count;           /* objects `base` holds (the static prefix) */
+    uint32_t base_serial;          /* scene_serial `base` was rendered at */
+    uint32_t scene_serial;         /* bumped by every message and takeover touching this lens */
     cfw_object objects[CACHE_OBJECTS];
     uint16_t active_list[CACHE_OBJECTS];
     uint16_t active_count;
@@ -534,6 +546,13 @@ typedef struct {
     uint8_t anim_render_max_ms, anim_gap_max_ms;
     uint16_t pan_requests;         /* presents asked of the display thread (page.c) */
     volatile uint16_t presented;   /* frames the display hook presented (disp.c, display thread) */
+    volatile uint8_t hook_compose_max_ms, hook_update_max_ms;   /* display thread: compose, LCDC update (revision 9) */
+    uint8_t present_gate;          /* why the last present request was refused: GATE_* bits */
+    uint8_t tuning;                /* CONTROL sub 3: TUNE_* bits */
+    volatile uint8_t wake_posted;  /* a TIO_WAKE_ID message is queued to the UI thread */
+    uint32_t activity_tick;        /* last fw_report_activity while presenting (once a second) */
+#define PRESENT_RETRY_MS 100u      /* a present request the display thread has not served by then is re-armed */
+    uint16_t anim_skipped;         /* frames not rendered because a present was still pending */
 
     /* uplink pacing */
     cfw_uplink uplink[UPLINK_QUEUE];
@@ -687,6 +706,14 @@ void cfw_page_present(customCfwContext *ctx);
 
 /* ---- message_processor message (verified against enqueue_message) ---------- */
 #define TIO_MSG_ID 0x54494d47u     /* 'TIMG' */
+#define TIO_WAKE_ID 0x54494d4bu    /* 'TIMK': run the page tick now (posted by the display hook after a present) */
+#define GATE_HOLD 0x01u
+#define GATE_NOT_OWN 0x02u
+#define GATE_PENDING 0x04u
+#define GATE_NO_POWER 0x08u
+#define GATE_NO_DRIVER 0x10u
+#define GATE_NO_FD 0x20u
+void cfw_post_wake(customCfwContext *ctx);   /* link.c: any thread */
 typedef struct {
     uint32_t id;
     const uint8_t *data;           /* mode 0: passed through and os_free'd by

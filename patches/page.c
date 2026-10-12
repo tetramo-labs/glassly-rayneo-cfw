@@ -49,6 +49,8 @@ void cfw_page_ensure_ui(customCfwContext *ctx) {
         if (!buf) continue;        /* disp.c shows the other lens's canvas in both eyes */
         cfw_zero(buf, (uint32_t)CFW_W * CFW_H);
         L->canvas = buf;
+        L->base = (uint8_t *)fw_memalign(16, (uint32_t)CFW_W * CFW_H);   /* optional: NULL = full renders */
+        L->base_valid = 0;
     }
     cfw_page_ensure_timer(ctx);
     if (!ctx->screen_cb_registered) {
@@ -179,7 +181,7 @@ void cfw_page_tick(customCfwContext *ctx) {
     }
     /* a present request the display thread never served (screen off) must
      * not block the next one forever */
-    if (ctx->disp_pan_pending && (now - ctx->disp_pan_tick) > 1000u) ctx->disp_pan_pending = 0;
+    if (ctx->disp_pan_pending && (now - ctx->disp_pan_tick) > PRESENT_RETRY_MS) ctx->disp_pan_pending = 0;
     /* a frame composed while the panel was off (screen timeout, wake) is
      * presented once the panel reports power again */
     if (ctx->page_open && ctx->disp_own && ctx->disp_dirty && !ctx->disp_pan_pending && fw_fb_get_power()) cfw_page_present(ctx);

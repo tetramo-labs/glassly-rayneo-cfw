@@ -8,7 +8,7 @@
 //     rayneo-io bridge                        # in another terminal
 //     bun anim-timing.ts
 import { CacheLink, CfwTransport, RayNeoBridge } from "./rayneo-transport";
-import { EASE, hide, inlineText, ops, putObject, record, show, T, REPLY } from "./object-cache";
+import { control, EASE, hide, inlineText, ops, putObject, record, show, T, REPLY } from "./object-cache";
 
 const RPL_SETTLED = 0x09;
 const FRAME_MS = 33;
@@ -35,9 +35,10 @@ const settled: { tag: number; at: number; stats?: string }[] = [];
 const u16 = (p: Uint8Array, o: number) => p[o]! | (p[o + 1]! << 8);
 const offReply = bridge.onReply((p) => {
   if (p[0] !== RPL_SETTLED || p.length < 3) return;
-  const stats = p.length >= 17
+  let stats = p.length >= 17
     ? `fw: ${u16(p, 3)} ms, ${u16(p, 5)} ticks, ${u16(p, 7)} frames, ${u16(p, 9)} renders, ${u16(p, 11)} pans, ${u16(p, 13)} presented, render max ${p[15]} ms, tick gap max ${p[16]} ms`
     : undefined;
+  if (stats && p.length >= 22) stats += `, gate 0x${p[17]!.toString(16)}, compose max ${p[18]} ms, update max ${p[19]} ms, skipped ${u16(p, 20)}`;
   settled.push({ tag: u16(p, 1), at: performance.now(), stats });
 });
 
@@ -87,11 +88,17 @@ async function run(heavy: boolean, frames: number): Promise<string> {
   return `${heavy ? "heavy" : "light"} scene, ${frames} frames (${nominal} ms nominal): SHOW acked in ${ack} ms, SETTLED after ${times} ms (${mine.length}/2 lenses, x${ratio})${stats ? `\n    ${stats}` : ""}`;
 }
 
+/** Tuning masks to compare (revision 9 CONTROL sub 3); older firmware runs the defaults once. */
+const TUNINGS: [number, string][] = ident.revision >= 9
+  ? [[0, "defaults"], [0x01, "presents gated on the power flag"], [0x02, "no UI wake"], [0x04, "render every frame"]]
+  : [[0, "defaults"]];
 let failed = 0;
 try {
   await link.reset();
-  for (const heavy of [false, true]) {
-    for (const frames of [15, 30, 60]) {
+  for (const [mask, label] of TUNINGS) {
+    if (ident.revision >= 9) await link.send(control.tuning(mask));
+    console.log(`-- tuning 0x${mask.toString(16)}: ${label}`);
+    for (const [heavy, frames] of [[false, 15], [false, 60], [true, 30]] as [boolean, number][]) {
       try {
         console.log(run.name, await run(heavy, frames));
       } catch (e) {
@@ -100,6 +107,7 @@ try {
       }
     }
   }
+  if (ident.revision >= 9) await link.send(control.tuning(0));
   await link.send(hide());
 } finally {
   offReply();

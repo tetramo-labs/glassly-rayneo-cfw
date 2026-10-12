@@ -428,6 +428,7 @@ static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t
 int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len,
                       uint8_t *status, uint16_t *request, int first, uint8_t *extra, uint8_t *extra_len) {
     ctx->refuse_reason = 0;
+    L->scene_serial++;             /* whatever this message changes, the static layer is stale */
     int handled = scene_message_apply(ctx, L, msg, len, status, request, first, extra, extra_len);
     if (handled && *status == ST_REFUSED && *extra_len == 0 && ctx->refuse_reason) { extra[0] = ctx->refuse_reason; *extra_len = 1; }
     journal_commit(ctx);
@@ -484,6 +485,11 @@ static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t
         if (sub == CTL_PERIOD) {
             if (blen != 2 || body[1] < 10 || body[1] > 250) return 0;
             ctx->anim_period_ms = body[1];
+            return 1;
+        }
+        if (sub == CTL_TUNING) {
+            if (blen != 2) return 0;
+            ctx->tuning = body[1];
             return 1;
         }
         return 0;
@@ -646,11 +652,6 @@ static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t
 }
 
 /* ---- rendering into the lens canvas (ctx->canvas_buf) ---------------------- */
-static void px_gray(customCfwContext *ctx, int x, int y, uint8_t v) {
-    if (x < 0 || y < 0 || x >= CFW_W || y >= CFW_H || !ctx->canvas_buf) return;
-    ctx->canvas_buf[(uint32_t)y * CFW_W + (uint32_t)x] = v;
-}
-
 /* Texture draw options (the G2 texture_cache.c): the record's color byte is
  * [inverse 0x20][transparent 0x10][ink 0..15]. The 4-bit LUT scales the
  * 0..15 source range into 0..ink (15 = identity), inverse reverses the
@@ -675,13 +676,23 @@ static void make_lut(uint8_t options, uint8_t *lut) {
  * each pixel pair swapped and odd widths drifted a pixel per row. */
 static void blit_rows(customCfwContext *ctx, const uint8_t *px, uint32_t iw, uint32_t ih, int hi_first,
                       int x, int y, const uint8_t *lut, int transparent) {
-    uint32_t n = 0;
-    for (uint32_t j = 0; j < ih; j++) {
-        for (uint32_t i = 0; i < iw; i++, n++) {
+    if (!ctx->canvas_buf || !iw || !ih) return;
+    /* clip once: rows [j0, j1) and columns [i0, i1) of the image land on the canvas */
+    int j0 = y < 0 ? -y : 0, j1 = (int)ih;
+    if (y + j1 > CFW_H) j1 = CFW_H - y;
+    int i0 = x < 0 ? -x : 0, i1 = (int)iw;
+    if (x + i1 > CFW_W) i1 = CFW_W - x;
+    if (j0 >= j1 || i0 >= i1) return;
+    uint8_t ink[16];
+    for (uint32_t g = 0; g < 16; g++) ink[g] = (uint8_t)(lut[g] * 17u);
+    for (int j = j0; j < j1; j++) {
+        uint8_t *dst = ctx->canvas_buf + (uint32_t)(y + j) * CFW_W + (uint32_t)(x + i0);
+        uint32_t n = (uint32_t)j * iw + (uint32_t)i0;
+        for (int i = i0; i < i1; i++, n++, dst++) {
             uint8_t b = px[n >> 1];
             uint8_t g = ((n & 1u) ^ (uint32_t)hi_first) ? (b >> 4) : (b & 0x0f);
             if (transparent && !g) continue;
-            px_gray(ctx, x + (int)i, y + (int)j, (uint8_t)(lut[g] * 17u));
+            *dst = ink[g];
         }
     }
 }
@@ -749,7 +760,14 @@ static uint32_t builtin_next(const uint8_t *str, uint32_t n, uint32_t *i) {
     if (ch < 0x80u) return ch;
     uint32_t extra = ch >= 0xF0u ? 3u : ch >= 0xE0u ? 2u : ch >= 0xC0u ? 1u : 0u;
     uint32_t code = '?';
-    if ((ch == 0xC2u || ch == 0xC3u) && *i < n && (str[*i] & 0xC0u) == 0x80u) code = ((ch & 0x1Fu) << 6) | (str[*i] & 0x3Fu);
+    if ((ch == 0xC2u || ch == 0xC3u) && *i < n && (str[*i] & 0xC0u) == 0x80u) {
+        code = ((ch & 0x1Fu) << 6) | (str[*i] & 0x3Fu);
+    } else if (extra == 2u && *i + 1 < n && (str[*i] & 0xC0u) == 0x80u && (str[*i + 1] & 0xC0u) == 0x80u) {
+        /* three-byte sequences: the font's extra glyphs (curly quotes, dashes, ...) sit after the Latin-1 slots */
+        uint32_t cp = ((ch & 0x0Fu) << 12) | ((str[*i] & 0x3Fu) << 6) | (str[*i + 1] & 0x3Fu);
+        for (uint32_t k = 0; k < FONT_BUILTIN_EXTRA_COUNT; k++)
+            if (font_builtin_extra[k] == cp) { code = 32u + FONT_BUILTIN_LATIN1_CHARS + k; break; }
+    }
     while (extra-- && *i < n && (str[*i] & 0xC0u) == 0x80u) (*i)++;
     return code;
 }
@@ -839,12 +857,36 @@ static void render_object(customCfwContext *ctx, cfw_object *o) {
     }
 }
 
+/* Objects before the first animating one, in z order: the static layer. */
+static uint16_t static_prefix(const cfw_lens *L) {
+    for (uint16_t k = 0; k < L->active_count; k++) {
+        const cfw_object *o = &L->objects[L->active_list[k]];
+        if (o->frames || o->rotation.duration) return k;
+    }
+    return L->active_count;
+}
+
 void cfw_scene_render(customCfwContext *ctx, cfw_lens *L) {
     if (!L->canvas) return;
     L->raster = 0;                               /* the scene owns the canvas again */
     ctx->canvas_buf = L->canvas;
-    memset(L->canvas, (uint8_t)(L->bg * 17u), (uint32_t)CFW_W * CFW_H);
-    for (uint16_t k = 0; k < L->active_count; k++) render_object(ctx, &L->objects[L->active_list[k]]);
+    uint16_t prefix = static_prefix(L);
+    int cached = L->base && prefix && L->base_valid && L->base_count == prefix && L->base_serial == L->scene_serial;
+    if (cached) {
+        memcpy(L->canvas, L->base, (uint32_t)CFW_W * CFW_H);
+    } else {
+        memset(L->canvas, (uint8_t)(L->bg * 17u), (uint32_t)CFW_W * CFW_H);
+        for (uint16_t k = 0; k < prefix; k++) render_object(ctx, &L->objects[L->active_list[k]]);
+        if (L->base && prefix < L->active_count) {   /* something animates on top: worth keeping */
+            memcpy(L->base, L->canvas, (uint32_t)CFW_W * CFW_H);
+            L->base_valid = 1;
+            L->base_count = prefix;
+            L->base_serial = L->scene_serial;
+        } else {
+            L->base_valid = 0;
+        }
+    }
+    for (uint16_t k = prefix; k < L->active_count; k++) render_object(ctx, &L->objects[L->active_list[k]]);
     ctx->canvas_buf = 0;
     cfw_page_present(ctx);
 }
@@ -861,6 +903,7 @@ void cfw_scene_takeover(customCfwContext *ctx, cfw_lens *L) {
     L->last_show_valid = 0;
     cfw_anim_settled(ctx, L);
     L->raster = 1;
+    L->scene_serial++;
 }
 
 /* Byte length of one shape record at rec (mode 36 lists them back to back),

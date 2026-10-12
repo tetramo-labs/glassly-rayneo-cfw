@@ -313,7 +313,7 @@ void cfw_anim_settled(customCfwContext *ctx, cfw_lens *L) {
     uint32_t elapsed = ctx->anim_started ? fw_tick() - ctx->anim_started : 0;
     uint16_t pans = (uint16_t)(ctx->pan_requests - ctx->anim_pan_base);
     uint16_t presented = (uint16_t)(ctx->presented - ctx->anim_presented_base);
-    uint8_t b[17];
+    uint8_t b[22];
     b[0] = RPL_SETTLED; b[1] = (uint8_t)L->settle_tag; b[2] = (uint8_t)(L->settle_tag >> 8);
     cfw_put16(b + 3, elapsed > 0xFFFFu ? 0xFFFFu : elapsed);
     cfw_put16(b + 5, ctx->anim_ticks);
@@ -323,6 +323,11 @@ void cfw_anim_settled(customCfwContext *ctx, cfw_lens *L) {
     cfw_put16(b + 13, presented);
     b[15] = ctx->anim_render_max_ms;
     b[16] = ctx->anim_gap_max_ms;
+    /* revision 9: the present gate, the display hook's costs and skipped renders */
+    b[17] = ctx->present_gate;
+    b[18] = ctx->hook_compose_max_ms;
+    b[19] = ctx->hook_update_max_ms;
+    cfw_put16(b + 20, ctx->anim_skipped);
     cfw_uplink_push(ctx, b, sizeof(b));
 }
 
@@ -338,7 +343,7 @@ void cfw_anim_stop(customCfwContext *ctx) {
  * with a 25 ms timer meant a frame every 50 ms and glides half speed. Now a
  * tick advances every whole period elapsed (bounded catch-up when a render
  * ran long) and keeps the remainder, so N frames take N periods. */
-#define ANIM_CATCH_UP 4u
+#define ANIM_CATCH_UP 8u   /* a tick after a long gap advances up to this many frames (the UI loop iterates ~190 ms apart while presenting) */
 void cfw_anim_tick(customCfwContext *ctx) {
     if (!ctx->anim_active) return;
     if (!ctx->page_open) { cfw_anim_stop(ctx); return; }
@@ -362,6 +367,10 @@ void cfw_anim_tick(customCfwContext *ctx) {
         int still = 0;
         for (uint32_t s = 0; s < steps; s++) { still = an_advance(L); if (!still) break; }
         if (still) moving = 1;
+        /* a frame the display thread could not show yet is not worth drawing
+         * (the G2 skips frames while its display task is busy); the final
+         * frame always lands */
+        if (still && ctx->disp_pan_pending && !(ctx->tuning & TUNE_RENDER_ALWAYS)) { ctx->anim_skipped++; continue; }
         uint32_t t0 = fw_tick();
         cfw_scene_render(ctx, L);
         uint32_t took = fw_tick() - t0;
@@ -385,8 +394,10 @@ void cfw_anim_arm(customCfwContext *ctx) {
         ctx->anim_last_tick = fw_tick();
         ctx->anim_started = ctx->anim_last_tick;
         ctx->anim_prev_tick = 0;
-        ctx->anim_ticks = ctx->anim_steps = ctx->anim_renders = 0;
+        ctx->anim_ticks = ctx->anim_steps = ctx->anim_renders = ctx->anim_skipped = 0;
         ctx->anim_render_max_ms = ctx->anim_gap_max_ms = 0;
+        ctx->hook_compose_max_ms = ctx->hook_update_max_ms = 0;
+        ctx->present_gate = 0;
         ctx->anim_pan_base = ctx->pan_requests;
         ctx->anim_presented_base = ctx->presented;
     }

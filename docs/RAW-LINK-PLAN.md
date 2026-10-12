@@ -386,24 +386,40 @@ In order:
    factory self-test parser, not this path.
 11. Revision 8 (2026-10-11): the builtin font is SF Pro Regular 20 px,
     proportional, 4-bit anti-aliased, printable Latin-1 with the face's pair
-    kerning (tools/gen_font.py, 38 KB; scene.c decodes the strings' UTF-8
-    two-byte sequences, anything else draws '?'), so inline text reads like
-    the G2's stock face; IDENT ends the name with a NUL and advertises the
-    font's line pitch (25 px), which the phone's scene encoder uses instead
-    of the G2's 27 px rows. Replies leave inline, in order, as soon as they
-    are queued (no 25 ms gap; a stereo SHOW's four replies used to cost
-    100 ms+). SETTLED carries the animation's statistics (ticks, frames,
-    renders, present requests, presented frames, longest render, longest
-    tick gap; tools/g2suite/anim-timing.ts prints them). Verified on
-    hardware: Swift suite 50/50, shapes 43/43, vector 23/23, cache-state
-    10/10. **Open: animations run slow** because the page timer (an LVGL
-    timer, 25 ms) only fires when the stock UI loop iterates, which during
-    an animation is once per present, about every 190 ms, and the catch-up
-    cap of 4 frames per tick cannot cover that: a 60-frame glide over one
-    disc settled in 3.4 s (18 ticks, 35 renders, longest render 26 ms), and
-    a scene with eight text lines renders at 255 ms+ per lens. Next: drive
-    the frame loop from a source that wakes the UI thread every period, and
-    cut the text render cost (the font blit sets pixels one call at a time).
+    kerning (tools/gen_font.py; scene.c decodes the strings' UTF-8
+    two-byte sequences), so inline text reads like the G2's stock face;
+    IDENT ends the name with a NUL and advertises the font's line pitch
+    (25 px), which the phone's scene encoder uses instead of the G2's 27 px
+    rows. Replies leave inline, in order, as soon as they are queued (no
+    25 ms gap; a stereo SHOW's four replies used to cost 100 ms+). SETTLED
+    carries the animation's statistics (tools/g2suite/anim-timing.ts prints
+    them, with a tuning matrix on revision 9).
+12. Revision 9 (2026-10-11, four flash cycles): animations. The statistics
+    showed the frame loop starved, not render-bound: the 25 ms LVGL page
+    timer only ran when the stock UI loop iterated, once per present, ~190 ms
+    apart, and a 4-frame catch-up cap could not cover it (a 60-frame glide
+    took 4 s). Fixes, each measured on the glasses: catch-up cap 8 (durations
+    right: 60 frames in 2.04 s); the display hook posts a TIO_WAKE_ID message
+    to the UI thread after each present so the next frame starts at once;
+    frames are skipped while a present is pending (the G2's rule); present
+    requests are issued even while the framebuffer power flag reads 0 (the
+    stock's screen timeout runs out under our page and the flag stays 0, yet
+    the display thread serves the requests: presented frames went from 12 to
+    38-42 per 2 s glide, ~20 fps) with a lost request re-armed after 100 ms;
+    the text blit writes rows directly (eight text lines: 255 ms+ → 116 ms
+    per lens); and a static-layer cache per lens (`base`, the objects before
+    the first animating one in z order, rendered once per scene change, then
+    copied) so an animation over text costs a copy plus the moving object
+    (eight lines + a glide: 4.6 s → 1.9 s, 22 presented frames). CONTROL
+    sub 3 TUNING flips each experiment at runtime. The font gained the common
+    punctuation and arrows outside Latin-1 (curly quotes, dashes, ellipsis,
+    bullet, euro, trademark, arrows, check mark; three-byte UTF-8 mapped to
+    extra table slots) and the phone folds everything else
+    (RayNeoIOCfwText): accented letters to base letters on older firmware,
+    emoji dropped, the rest '?'. Still open: the first render of a text-heavy
+    scene (255 ms+ per lens) delays an animation's start, and presents are
+    bounded by the display thread's compose (~55 ms) when the panel is
+    accepting frames.
 Not applicable: mic routing, R1 ring, ALS, BLE link profile, the Cordio
 keyboard bridge, the protobuf settings channel (business 0xF0 and the stock
 inflater replace them).

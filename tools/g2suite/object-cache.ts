@@ -146,6 +146,8 @@ export const control = {
   reset: (request = 0, replyCapacity = 0) => Uint8Array.from([...header(MODE.CONTROL, request), 0, ...(replyCapacity ? [int(replyCapacity, 16, 255, "reply capacity")] : [])]),
   drop: (ids: number[], request = 0) => Uint8Array.from([...header(MODE.CONTROL, request), 1, int(ids.length, 0, 255, "ids"), ...ids.flatMap((id) => u32(id32(id)))]),
   period: (ms: number, request = 0) => Uint8Array.from([...header(MODE.CONTROL, request), 2, int(ms, 10, 250, "period")]),
+  /** Revision 9 experiments: bit0 refuse presents while the panel power flag reads 0, bit1 no UI wake from the display hook, bit2 render every frame. */
+  tuning: (mask: number, request = 0) => Uint8Array.from([...header(MODE.CONTROL, request), 3, int(mask, 0, 255, "tuning")]),
 };
 export const isCacheMessage = (m: Uint8Array) => m.length >= 5 && m[0]! >= MODE.PUT && m[0]! <= MODE.CONTROL;
 /**

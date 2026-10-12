@@ -189,13 +189,30 @@ void cfw_disp_pass(int on) {
  * One request in flight at a time; the page timer re-arms a lost one. */
 void cfw_page_present(customCfwContext *ctx) {
     ctx->disp_dirty = 1;
-    if (ctx->disp_hold) return;                     /* a bundle presents once, at its end (raster.c) */
-    if (!ctx->page_open || !ctx->disp_own || ctx->disp_pan_pending) return;
-    if (!fw_fb_get_power()) return;                  /* panel off: the display thread would skip it anyway */
+    if (ctx->disp_hold) { ctx->present_gate |= GATE_HOLD; return; }   /* a bundle presents once, at its end (raster.c) */
+    if (!ctx->page_open) return;
+    /* Content is changing: tell the stock display manager, as a touch would.
+     * Without it the stock's screen timeout runs out under our page (the
+     * status report shows screenStatus 0 while the page is up), the panel
+     * drops to its idle refresh, our present requests are refused by the
+     * power flag and animations crawl at the idle rate. Once a second. */
+    uint32_t now = fw_tick();
+    if (!ctx->activity_tick || now - ctx->activity_tick >= 1000u) { ctx->activity_tick = now; fw_report_activity(); }
+    if (!ctx->disp_own) { ctx->present_gate |= GATE_NOT_OWN; return; }
+    if (ctx->disp_pan_pending) { ctx->present_gate |= GATE_PENDING; return; }
+    /* The framebuffer power flag reads 0 for most of a page's life (the stock
+     * screen timeout runs out under it) yet the display thread still serves
+     * most requests, and animations present 3x more often when asked
+     * (revision 9 timing runs); a request it does drop is re-armed after
+     * PRESENT_RETRY_MS. TUNE_PRESENT_GATED restores the old refusal. */
+    if (!fw_fb_get_power()) {
+        ctx->present_gate |= GATE_NO_POWER;
+        if (ctx->tuning & TUNE_PRESENT_GATED) return;
+    }
     uint8_t *d = disp_driver(0);
-    if (!d) return;
+    if (!d) { ctx->present_gate |= GATE_NO_DRIVER; return; }
     int fd = (int)ld32(d + FBD_FD);
-    if (fd < 0) return;
+    if (fd < 0) { ctx->present_gate |= GATE_NO_FD; return; }
     ctx->disp_pan_pending = 1;
     ctx->disp_pan_tick = fw_tick();
     ctx->pan_requests++;
@@ -213,10 +230,13 @@ void cfw_lcdc_hook(void *src, void *area, uint32_t c, uint32_t flag, void *depth
         /* compose here, on the display thread, so no stock compose can be in
          * flight on the same buffers (the LVGL-thread fill glitched the first
          * frames on hardware) */
+        uint32_t t0 = fw_tick();
         if (ctx->disp_dirty) {
             ctx->disp_dirty = 0;
             if (ctx->disp_pattern) disp_fill_dual_pattern(); else disp_compose_scene(ctx);
         }
+        uint32_t t1 = fw_tick();
+        if (t1 - t0 > ctx->hook_compose_max_ms) ctx->hook_compose_max_ms = t1 - t0 > 255u ? 255u : (uint8_t)(t1 - t0);
         /* The stock never shows the pair through the full dual update (that
          * one drifted a row per frame on hardware); rayneo_lcdc_update_self
          * re-presents the current buffers the stock way: with kind 3 and the
@@ -226,8 +246,13 @@ void cfw_lcdc_hook(void *src, void *area, uint32_t c, uint32_t flag, void *depth
         lcdc[LCDC_KIND] = 3;
         lcdc[LCDC_COMPOSED] = 1;
         fw_lcdc_update_self();
+        uint32_t t2 = fw_tick();
+        if (t2 - t1 > ctx->hook_update_max_ms) ctx->hook_update_max_ms = t2 - t1 > 255u ? 255u : (uint8_t)(t2 - t1);
         ctx->presented++;
         ctx->disp_pan_pending = 0;
+        /* the display is free again: let the UI thread draw the next frame now
+         * instead of at its own loop's pace (one iteration per present, ~190 ms) */
+        if (ctx->anim_active && !(ctx->tuning & TUNE_NO_WAKE)) cfw_post_wake(ctx);
         return;
     }
     fw_lcdc_layer_update(src, area, c, flag, depth);

@@ -274,8 +274,13 @@ static void cfw_packet(customCfwContext *ctx, uint8_t opt, uint8_t stream, const
 static void cfw_ui_handler(void *arg, void *user) {
     (void)user;
     const TIONativeMessage *m = (const TIONativeMessage *)arg;
-    if (!m || m->id != TIO_MSG_ID || !m->data) return;
+    if (!m || !m->data) return;
     customCfwContext *ctx = cfw_ctx_peek();
+    if (m->id == TIO_WAKE_ID) {
+        if (ctx) { ctx->wake_posted = 0; cfw_page_tick(ctx); }
+        return;
+    }
+    if (m->id != TIO_MSG_ID) return;
     if (ctx && m->bytes >= 2) {
         cfw_page_ensure_timer(ctx);
         cfw_packet(ctx, m->data[0], m->data[1], m->data + 2, m->bytes - 2);
@@ -321,6 +326,23 @@ static void cfw_rx_data(uint32_t bus, const uint8_t *data, uint32_t len) {
     int rc = fw_msg_send(ctx->ui_module, &msg);
     ctx->ui_send_rc = (int8_t)rc;
     if (rc != 0) fw_free(copy);   /* not queued: still ours */
+}
+
+/* Any thread: have the UI thread run the page tick as soon as it can. One
+ * wake in flight at a time; the queue frees the one-byte payload (mode 0). */
+void cfw_post_wake(customCfwContext *ctx) {
+    if (!ctx->ui_module || ctx->wake_posted) return;
+    uint8_t *tag = (uint8_t *)fw_memalign(4, 4);
+    if (!tag) return;
+    tag[0] = 1;
+    TIONativeMessage msg;
+    cfw_zero(&msg, (uint32_t)sizeof(msg));
+    msg.id = TIO_WAKE_ID;
+    msg.data = tag;
+    msg.bytes = 1;
+    msg.mode = 0;
+    ctx->wake_posted = 1;
+    if (fw_msg_send(ctx->ui_module, &msg) != 0) { ctx->wake_posted = 0; fw_free(tag); }
 }
 
 /* Registered by the boot shim; RNLink copies the 32 bytes. Only slot 0 is used.
