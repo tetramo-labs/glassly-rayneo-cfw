@@ -9,6 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "cfw.h"
+#define fw_memalign(a, n) malloc(n)
+#define fw_free(p) free(p)
+#define fw_tick() 100u
 
 void cfw_zero(void *p, uint32_t n) { memset(p, 0, n); }
 void cfw_page_present(customCfwContext *ctx) { (void)ctx; }
@@ -39,9 +42,9 @@ static void expect(customCfwContext *ctx, int x, int y, int gray) {
 
 int main(void) {
     static customCfwContext ctx;
-    static uint8_t store[CFW_STORE_BYTES];
+    static uint8_t store[CFW_STORE_MAX_BYTES];
     static uint8_t canvas[CFW_W * CFW_H];
-    ctx.store = store; ctx.lens[0].canvas = canvas;
+    ctx.store = store; ctx.store_bytes = CFW_STORE_MAX_BYTES; ctx.store_granules = STORE_GRANULES_MAX; ctx.lens[0].canvas = canvas;
     store_clear(&ctx);
     /* 3x2 image, pixels row 0: 1 2 3, row 1: 4 5 6 as six single-pixel RLE tokens [1<<4|c] */
     uint8_t img[] = { 3, 2, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16 };

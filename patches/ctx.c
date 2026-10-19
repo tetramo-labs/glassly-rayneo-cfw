@@ -29,8 +29,7 @@
 #define RN_OFF_BUS  0x28u
 
 void cfw_zero(void *p, uint32_t n) {
-    volatile uint8_t *b = (volatile uint8_t *)p;
-    for (uint32_t i = 0; i < n; i++) b[i] = 0;
+    memset(p, 0, n);
 }
 
 /* Our registry entry, or NULL before cfw_boot_register ran. */
@@ -68,7 +67,12 @@ customCfwContext *cfw_ctx(void) {
     cfw_zero(c, (uint32_t)sizeof(*c));
     c->magic = CFW_CTX_MAGIC;
     c->ctx_size = (uint32_t)sizeof(*c);
-    c->store = (uint8_t *)fw_memalign(16, CFW_STORE_BYTES);
+    /* the largest store the heap grants; IDENT reports the size obtained */
+    static const uint32_t sizes[] = { 256u * 1024u, 192u * 1024u, 128u * 1024u, 96u * 1024u, STORE_KIB_MIN * 1024u };
+    for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]) && !c->store; i++) {
+        c->store = (uint8_t *)fw_memalign(16, sizes[i]);
+        if (c->store) { c->store_bytes = sizes[i]; c->store_granules = sizes[i] / STORE_GRANULE; }
+    }
     if (!c->store) { fw_free(c); return 0; }
     *cell = c;   /* publish last: readers validate magic + size */
     return c;

@@ -118,6 +118,9 @@ FW_SYMBOLS = [
     ("fb_depth_mode", "rayneo_fb_get_depth_mode", None),
     ("fb_disp_mode", "rayneo_fb_get_disp_mode", None),
     ("logger_log", "logger_log", None),
+    # heap report in DIAG (ident.c): the libc wrapper that passes the user heap global
+    # to mm_mallinfo (0x105D92AD, the kernel entry that needs the heap pointer)
+    ("mallinfo", "mallinfo", 0x108C501D),
 ]
 
 # ---- hook site (byte-verified against the stock image) ----------------------
@@ -161,6 +164,16 @@ HINT_SITES = [
     (0x1083F904, 0x1083F8BD, "cfw_bond_language", "BondView::getLocalizedText: bl getActiveTextLanguage -> cfw_bond_language (no language carousel)"),
     (0x1083F910, I18N_GET_TEXT, "cfw_bond_text", "BondView::getLocalizedText: bl I18nManager::GetText -> cfw_bond_text (English, Glassly wording)"),
 ]
+# Mic (revision 10): StateMonitorAdapter::isRemoteAudioStreamAllowed is a stock
+# stub that returns 0, so the phone's AUDIO_STREAM_CONTROL (business 13 type 58
+# {"rc":1}) is always "rejected by current conflict" and the glasses mic only
+# streams inside a voice-assistant session. Flip the stub to return 1: the
+# remote stream (type 59 Opus frames, no assistant UI) then opens whenever no
+# session, call, SCO link or recording holds the recorder. The site is resolved
+# by name and its whole 8-byte body is asserted before the 2-byte change.
+MIC_ALLOW_SYMBOL = "rayneo::service::assistant::StateMonitorAdapter::isRemoteAudioStreamAllowed"
+MIC_ALLOW_STOCK = bytes.fromhex("80b5" "0020" "00af" "80bd")   # push {r7,lr}; movs r0,#0; add r7,sp,#0; pop {r7,pc}
+MIC_ALLOW_NEW = bytes.fromhex("0120")                           # movs r0,#1
 SHIM_ASSERTS = [
     (0x1075D03C, 0x1980FCD8),    # rayneo_intercept_btn_event's literal: the button interceptor list head (cfw.h BTN_LIST_HEAD)
     (0x106D9D9C, 0x19750D2C),    # &launcher business-15 callback table
@@ -532,6 +545,17 @@ def build_ap(ap, src=None):
         new = _branch_bytes(site, (module_va + funcs[func]) | 1, link=True)
         ops.append({"offset": off(site), "old": stock.hex(), "new": new.hex(), "desc": desc})
         lcdc_hooks.append({"site": hex(site), "len": 4, "old": stock.hex(), "new": new.hex(), "purpose": desc})
+
+    # 2e. Mic: open the remote audio stream gate (a stock `return 0` stub).
+    syms, by_name = load_symbols()
+    mic_fn = resolve_symbol(ap, syms["segments"], by_name, MIC_ALLOW_SYMBOL, None) & ~1
+    if ap[off(mic_fn):off(mic_fn) + len(MIC_ALLOW_STOCK)] != MIC_ALLOW_STOCK:
+        raise BuildError("isRemoteAudioStreamAllowed is not the expected `return 0` stub")
+    mic_site = mic_fn + 2
+    ops.append({"offset": off(mic_site), "old": MIC_ALLOW_STOCK[2:4].hex(), "new": MIC_ALLOW_NEW.hex(),
+                "desc": "StateMonitorAdapter::isRemoteAudioStreamAllowed: movs r0,#0 -> movs r0,#1 (remote mic stream allowed)"})
+    lcdc_hooks.append({"site": hex(mic_site), "len": 2, "old": MIC_ALLOW_STOCK[2:4].hex(), "new": MIC_ALLOW_NEW.hex(),
+                       "purpose": "isRemoteAudioStreamAllowed returns 1: business 13 type 58 {\"rc\":1} opens the Opus remote audio stream (type 59)"})
 
     # 3. Relocate the build-info footer and append the module 32-byte aligned.
     pad = module_at - footer_at           # old footer bytes become zero padding

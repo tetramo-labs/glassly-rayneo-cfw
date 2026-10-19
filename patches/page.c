@@ -115,6 +115,7 @@ void cfw_page_close(customCfwContext *ctx, uint8_t reason) {
     for (unsigned e = 0; e < 2; e++) {
         cfw_lens *L = &ctx->lens[e];
         if (L->canvas) cfw_zero(L->canvas, (uint32_t)CFW_W * CFW_H);
+        L->canvas_valid = 0;
     }
     ctx->page_open = 0;
     /* give the panel back: the stock flush resumes and repaints the launcher */

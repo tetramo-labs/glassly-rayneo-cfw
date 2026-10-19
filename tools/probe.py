@@ -68,8 +68,15 @@ def parse_diag(payload):
     if len(payload) < 21 or payload[0] != 0x15:
         return None
     entry, ctx, ui_module, reg_rc, send_rc, timer, tick = struct.unpack_from("<IIBbbII", payload, 2)
-    return dict(source={1: "rx", 2: "ui"}.get(payload[1], payload[1]), entry=hex(entry), ctx=hex(ctx),
-                ui_module=ui_module, reg_rc=reg_rc, send_rc=send_rc, timer=hex(timer), tick=tick)
+    out = dict(source={1: "rx", 2: "ui"}.get(payload[1], payload[1]), entry=hex(entry), ctx=hex(ctx),
+               ui_module=ui_module, reg_rc=reg_rc, send_rc=send_rc, timer=hex(timer), tick=tick)
+    if len(payload) >= 39:   # revision 10: the stock heap (mallinfo) and the store the heap granted
+        arena, free, largest, inuse, store_kib = struct.unpack_from("<IIIIH", payload, 21)
+        out.update(heap_arena=arena, heap_free=free, heap_largest=largest, heap_inuse=inuse, store_kib=store_kib)
+    if len(payload) >= 51:   # revision 11: scene renders vs shared-eye copies, and render latency
+        renders, copies, last_ms, max_ms = struct.unpack_from("<IIHH", payload, 39)
+        out.update(scene_renders=renders, scene_copies=copies, scene_last_ms=last_ms, scene_max_ms=max_ms)
+    return out
 
 
 def parse_ident(payload):

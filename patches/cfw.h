@@ -29,6 +29,12 @@ static inline void *fw_memalign(uint32_t a, uint32_t n) {
     return FW(void *(*)(uint32_t, uint32_t), FWA_memalign)(a, n);
 }
 static inline void fw_free(void *p) { FW(void (*)(void *), FWA_free)(p); }
+/* NuttX struct mallinfo: arena, ordblks, aordblks, mxordblk, uordblks, fordblks,
+ * usmblks (seven ints; mm_mallinfo zeroes 0x1c bytes). mallinfo() takes the
+ * struct-return pointer in r0 and reads the user heap from its global. Spare
+ * words absorb a longer struct in another firmware build. */
+typedef struct { int32_t arena, ordblks, aordblks, mxordblk, uordblks, fordblks, usmblks; int32_t spare[9]; } cfw_mallinfo;
+static inline void fw_mallinfo(cfw_mallinfo *m) { FW(void (*)(cfw_mallinfo *), FWA_mallinfo)(m); }
 static inline uint32_t fw_tick(void) { return FW(uint32_t (*)(void), FWA_os_get_tick_count)(); }
 static inline int fw_send(uint32_t biz, const void *b, uint32_t n, void *cb) {
     return FW(int (*)(uint32_t, const void *, uint32_t, void *), FWA_rnlink_if_send_payload)(biz, b, n, cb);
@@ -172,11 +178,14 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 9u
-#define REV_TEXT  "9"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
-#define REV_STRING "GLASSLYCFW-IO/9"
+#define REV_MAJOR 11u
+#define REV_TEXT  "11"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
+#define REV_STRING "GLASSLYCFW-IO/11"
 #define MAX_CHUNK 240u
-#define STORE_KIB 64u
+/* The store is the largest of 256/192/128/96/64 KiB the heap grants at context
+ * creation (ctx.c); IDENT, STATE and DIAG report the size obtained. */
+#define STORE_KIB_MAX 256u
+#define STORE_KIB_MIN 64u
 /* IDENT flags: bit0 = zlib COMPRESSED records accepted; bit1 = raw stream packets
  * accepted on business 0xF0 (the only downlink since revision 2); bit2 = the
  * heap context exists (set per reply, not part of IDENT_FLAGS). */
@@ -185,9 +194,10 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define IDENT_FLAG_CONTEXT  0x04u
 #define IDENT_FLAG_STEREO   0x08u  /* two lens scenes: records carry a lens mask (revision 5) */
 #define IDENT_FLAG_RASTER   0x10u  /* the direct-framebuffer family (modes 3/6/8/9/11/15/19/20/36, raster.c; revision 7) */
-#define IDENT_FLAGS         (IDENT_FLAG_ZLIB | IDENT_FLAG_RAW_0XF0 | IDENT_FLAG_STEREO | IDENT_FLAG_RASTER)
+#define IDENT_FLAG_MIC      0x20u  /* the assistant's remote audio stream is allowed: business 13 type 58 {"rc":1|2} opens/closes it, Opus frames arrive as type 59 (revision 10) */
+#define IDENT_FLAGS         (IDENT_FLAG_ZLIB | IDENT_FLAG_RAW_0XF0 | IDENT_FLAG_STEREO | IDENT_FLAG_RASTER | IDENT_FLAG_MIC)
 #define RAW_MAX_BYTES 4096u        /* one frame payload: [opt][stream][chunk <= MAX_CHUNK] */
-#define CFW_STORE_BYTES (STORE_KIB * 1024u)
+#define CFW_STORE_MAX_BYTES (STORE_KIB_MAX * 1024u)
 
 /* stream packet opt bits */
 #define PKT_LENS    0x01u
@@ -408,9 +418,10 @@ typedef struct {
     uint32_t id, version, offset, length, filled;
     uint32_t last_use;             /* use clock of the last object that drew it (LRU) */
     uint8_t kind, state;           /* state bit0 = complete */
+    uint8_t pinned;                /* protected during the current PUT/SHOW */
 } cfw_asset;
-#define STORE_GRANULE 64u          /* store allocator unit (bitmap of CFW_STORE_BYTES / 64 bits) */
-#define STORE_GRANULES (CFW_STORE_BYTES / STORE_GRANULE)
+#define STORE_GRANULE 64u          /* store allocator unit (bitmap of store_bytes / 64 bits, sized for the maximum) */
+#define STORE_GRANULES_MAX (CFW_STORE_MAX_BYTES / STORE_GRANULE)
 
 typedef struct {
     uint32_t id, version, asset_id, font_id;
@@ -468,6 +479,8 @@ typedef struct {
      * animation frame costs a copy plus the moving objects */
     uint8_t *base;                 /* L8 CFW_W x CFW_H, NULL when the heap had none (full renders) */
     uint8_t base_valid;
+    uint8_t canvas_valid;
+    uint32_t canvas_serial;         /* scene_serial last drawn into this canvas */
     uint16_t base_count;           /* objects `base` holds (the static prefix) */
     uint32_t base_serial;          /* scene_serial `base` was rendered at */
     uint32_t scene_serial;         /* bumped by every message and takeover touching this lens */
@@ -499,7 +512,7 @@ typedef struct {
     volatile uint8_t disp_dirty;   /* eye buffers need (re)composing on the display thread */
     volatile uint8_t disp_pattern; /* compose the probe's diagnostic images instead of the scenes */
     volatile uint8_t disp_pan_pending; /* a present request is queued at the display thread */
-    uint8_t disp_hold;             /* presents deferred (a bundle in progress): the canvas stays dirty */
+    volatile uint8_t disp_hold;             /* presents deferred (a bundle in progress): the canvas stays dirty */
     uint32_t disp_pan_tick;
     uint8_t page_open;
     uint8_t screen_cb_registered; /* page.c: the display manager's screen-state callback is ours too */
@@ -516,6 +529,8 @@ typedef struct {
     /* page / LVGL (UI thread only) */
     void *page_root;               /* black placeholder on the launcher screen (input focus) */
     uint8_t *canvas_buf;           /* current draw target for geom.c/scene.c (a lens canvas) */
+    uint32_t scene_renders, scene_copies; /* DIAG v11: full/static-cache render vs other-eye copy */
+    uint16_t scene_last_ms, scene_max_ms;
     uint8_t draw_gray;             /* L8 value geometry writes (gray nibble x 17) */
     void *timer;
     uint32_t lease_deadline;       /* tick */
@@ -523,12 +538,15 @@ typedef struct {
     /* ingress */
     cfw_stream stream;
     uint8_t *store;
+    uint32_t store_bytes;          /* size obtained (ctx.c), STORE_KIB_MIN..STORE_KIB_MAX KiB */
+    uint32_t store_granules;       /* store_bytes / STORE_GRANULE */
     uint32_t store_used;           /* bytes in use (diagnostics) */
-    uint8_t store_map[STORE_GRANULES / 8]; /* granule bitmap: 1 = allocated */
+    uint8_t store_map[STORE_GRANULES_MAX / 8]; /* granule bitmap: 1 = allocated */
     uint32_t use_clock;            /* LRU clock, bumped per put/show */
     uint32_t evicted;              /* objects evicted while applying the current message */
     cfw_asset assets[CACHE_ASSETS];
     cfw_lens lens[2];
+    struct cfw_transaction *transaction; /* UI-thread PUT/SHOW undo log, NULL outside a message */
     uint8_t cache_ready;           /* a RESET established the session (STATE answers RESET before) */
     uint8_t refuse_reason;         /* REFUSE_* of the message being applied (REPLY extra) */
     cfw_vector_work *vector_work;  /* paths and rotation (vector.c), allocated on first use */

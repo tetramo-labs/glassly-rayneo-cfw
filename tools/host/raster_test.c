@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "cfw.h"
+#define fw_memalign(a, n) malloc(n)
+#define fw_free(p) free(p)
+#define fw_tick() 100u
 
 void cfw_zero(void *p, uint32_t n) { memset(p, 0, n); }
 static int presents;
@@ -32,7 +35,7 @@ int cfw_anim_any(const cfw_lens *L) { (void)L; return 0; }
 #include "raster.c"
 
 static customCfwContext ctx;
-static uint8_t store[CFW_STORE_BYTES];
+static uint8_t store[CFW_STORE_MAX_BYTES];
 static uint8_t canvas[2][CFW_W * CFW_H];
 static int fail;
 
@@ -59,7 +62,7 @@ static uint32_t run(uint8_t *out, uint8_t color, uint32_t n) {
 }
 
 int main(void) {
-    ctx.store = store;
+    ctx.store = store; ctx.store_bytes = CFW_STORE_MAX_BYTES; ctx.store_granules = STORE_GRANULES_MAX;
     for (int e = 0; e < 2; e++) { ctx.lens[e].canvas = canvas[e]; ctx.lens[e].bit = e ? LENS_RIGHT : LENS_LEFT; }
     store_clear(&ctx);
     ctx.page_open = 1;

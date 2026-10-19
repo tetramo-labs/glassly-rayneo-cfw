@@ -14,6 +14,7 @@
  * fb_videoinfo_s at +4, fb_planeinfo_s at +0xc, the mmap at +0x28.
  */
 #include "cfw.h"
+#include "pixels.h"
 
 #define FBD_FD         0x00u
 #define FBD_FMT        0x04u   /* fb_videoinfo_s.fmt */
@@ -166,10 +167,7 @@ static void disp_compose_scene(customCfwContext *ctx) {
             if (y >= CFW_H || !src) { cfw_zero(row, G4_STRIDE); continue; }
             const uint8_t *s = src + y * CFW_W;
             cfw_zero(row, G4_MARGIN);
-            uint8_t *d = row + G4_MARGIN;
-            for (uint32_t x = 0; x < CFW_W; x += 2) {
-                *d++ = (uint8_t)((s[x] & 0xf0) | (s[x + 1] >> 4));
-            }
+            cfw_pack_l8_row(row + G4_MARGIN, s);
             cfw_zero(row + G4_MARGIN + G4_PX_BYTES, G4_STRIDE - G4_MARGIN - G4_PX_BYTES);
         }
     }
@@ -231,7 +229,7 @@ void cfw_lcdc_hook(void *src, void *area, uint32_t c, uint32_t flag, void *depth
          * flight on the same buffers (the LVGL-thread fill glitched the first
          * frames on hardware) */
         uint32_t t0 = fw_tick();
-        if (ctx->disp_dirty) {
+        if (ctx->disp_dirty && !ctx->disp_hold) {
             ctx->disp_dirty = 0;
             if (ctx->disp_pattern) disp_fill_dual_pattern(); else disp_compose_scene(ctx);
         }

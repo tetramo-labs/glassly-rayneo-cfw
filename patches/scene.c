@@ -19,6 +19,8 @@ uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 static int16_t rds16(const uint8_t *p) { return (int16_t)rd16(p); }
 
+#include "cache_txn.c"
+
 /* ---- store allocator (granule bitmap, first fit; assets and inline strings
  * are freed when evicted, as in the G2 scene.c) ----------------------------- */
 static uint32_t store_granules(uint32_t len) { return (len + STORE_GRANULE - 1u) / STORE_GRANULE; }
@@ -32,10 +34,11 @@ static void store_mark(customCfwContext *ctx, uint32_t g0, uint32_t n, int set) 
 static uint32_t store_alloc(customCfwContext *ctx, uint32_t n) {
     uint32_t need = store_granules(n ? n : 1u);
     uint32_t run = 0;
-    for (uint32_t g = 0; g < STORE_GRANULES; g++) {
+    for (uint32_t g = 0; g < ctx->store_granules; g++) {
         run = store_bit(ctx, g) ? 0 : run + 1;
         if (run == need) {
             uint32_t g0 = g + 1u - need;
+            if (!txn_save_store(ctx, g0, need)) return 0xffffffffu;
             store_mark(ctx, g0, need, 1);
             ctx->store_used += need * STORE_GRANULE;
             return g0 * STORE_GRANULE;
@@ -44,9 +47,9 @@ static uint32_t store_alloc(customCfwContext *ctx, uint32_t n) {
     return 0xffffffffu;
 }
 static void store_free(customCfwContext *ctx, uint32_t offset, uint32_t len) {
-    if (!len || offset >= CFW_STORE_BYTES) return;
+    if (!len || offset >= ctx->store_bytes) return;
     uint32_t g0 = offset / STORE_GRANULE, n = store_granules(len);
-    if (g0 + n > STORE_GRANULES) n = STORE_GRANULES - g0;
+    if (g0 + n > ctx->store_granules) n = ctx->store_granules - g0;
     store_mark(ctx, g0, n, 0);
     ctx->store_used -= n * STORE_GRANULE;
 }
@@ -55,9 +58,20 @@ static void store_clear(customCfwContext *ctx) {
     ctx->store_used = 0;
 }
 
+/* Renderers keep the complete version while its replacement uploads. */
 static cfw_asset *asset_find(customCfwContext *ctx, uint32_t id) {
+    cfw_asset *pending = 0;
+    for (unsigned i = 0; i < CACHE_ASSETS; i++) {
+        cfw_asset *a = &ctx->assets[i];
+        if (!id || a->id != id) continue;
+        if (a->state & 1) return a;
+        pending = a;
+    }
+    return pending;
+}
+static cfw_asset *asset_version(customCfwContext *ctx, uint32_t id, uint32_t version) {
     for (unsigned i = 0; i < CACHE_ASSETS; i++)
-        if (ctx->assets[i].id == id && id) return &ctx->assets[i];
+        if (ctx->assets[i].id == id && ctx->assets[i].version == version) return &ctx->assets[i];
     return 0;
 }
 cfw_object *object_find(cfw_lens *L, uint32_t id) {
@@ -105,6 +119,7 @@ static void journal_commit(customCfwContext *ctx) {
 /* ---- eviction (G2 scene.c): unreferenced assets first, then the least
  * recently used object that is neither active nor pinned ------------------- */
 static void object_free(customCfwContext *ctx, cfw_object *o) {
+    if (!txn_save_object(ctx, o)) return;
     if (o->id) journal_note(ctx, lens_of(ctx, o), JOURNAL_OBJECT, o->id, 0);
     if (o->text_len) store_free(ctx, o->text_off, (uint32_t)o->text_len + 1u);
     if (o->path_bytes) store_free(ctx, o->path_off, o->path_bytes);
@@ -127,7 +142,7 @@ static int evict_asset(customCfwContext *ctx) {
     int best = -1;
     for (unsigned i = 0; i < CACHE_ASSETS; i++) {
         const cfw_asset *a = &ctx->assets[i];
-        if (!a->id || asset_referenced(ctx, a->id)) continue;
+        if (!a->id || a->pinned || asset_referenced(ctx, a->id)) continue;
         if (best < 0 || a->last_use < ctx->assets[best].last_use) best = (int)i;
     }
     if (best < 0) return 0;
@@ -148,6 +163,7 @@ static int evict_object(customCfwContext *ctx, cfw_lens *L) {
     }
     if (!best) return 0;
     object_free(ctx, best);
+    if (ctx->transaction && ctx->transaction->failed) return 0;
     ctx->evicted++;
     return 1;
 }
@@ -172,11 +188,13 @@ static uint32_t store_reserve(customCfwContext *ctx, uint32_t n) {
     for (;;) {
         uint32_t off = store_alloc(ctx, n);
         if (off != 0xffffffffu) return off;
+        if (ctx->transaction && ctx->transaction->failed) return 0xffffffffu;
         if (!evict_asset(ctx) && !evict_object(ctx, 0)) return 0xffffffffu;
     }
 }
 
 static void lens_reset(cfw_lens *L) {
+    L->canvas_valid = 0;
     L->settle_pending = 0;
     L->last_show_valid = 0;
     L->bg = 0;
@@ -291,6 +309,37 @@ static uint32_t put_entry_len(const uint8_t *e, uint32_t avail) {
     return 9u + rlen;
 }
 
+/* Scan one RLE image without allocating/decompressing it. A font contains
+ * several such streams, so return the byte count through its last pixel. */
+static uint32_t asset_image_bytes(const uint8_t *p, uint32_t n) {
+    if (n < 3 || !p[0] || !p[1]) return 0;
+    uint32_t left = (uint32_t)p[0] * p[1], pos = 2;
+    while (left) {
+        if (pos >= n) return 0;
+        uint32_t run = p[pos++] >> 4;
+        if (!run) {
+            if (pos >= n) return 0;
+            run = p[pos++];
+            if (!run) { if (n - pos < 2) return 0; run = rd16(p + pos); pos += 2; }
+        }
+        if (!run || run > left) return 0;
+        left -= run;
+    }
+    return pos;
+}
+static int asset_content_valid(const uint8_t *p, uint32_t n, uint8_t kind) {
+    if (kind == ASSET_IMAGE) return asset_image_bytes(p, n) == n;
+    if (kind == ASSET_FONT) {
+        if (n < 96u * 4u) return 0;
+        for (uint32_t i = 0; i < 96u; i++) {
+            uint32_t off = rd32(p + i * 4u);
+            if (off && (off < 384u || off >= n || !asset_image_bytes(p + off, n - off))) return 0;
+        }
+        return 1;
+    }
+    return kind == ASSET_STRING;
+}
+
 static int put_entry(customCfwContext *ctx, cfw_lens *L, const uint8_t *e, uint32_t len) {
     if (len < 1) return ST_REFUSED;
     uint8_t kind = e[0];
@@ -300,10 +349,31 @@ static int put_entry(customCfwContext *ctx, cfw_lens *L, const uint8_t *e, uint3
         uint8_t akind = e[9];
         uint32_t total = rd32(e + 10), offset = rd32(e + 14);
         uint16_t dl = rd16(e + 18);
-        if ((uint32_t)20 + dl > len || offset + dl > total || total > CFW_STORE_BYTES) return ST_REFUSED;
-        cfw_asset *a = asset_find(ctx, id);
-        if (!a || a->version != ver) {
-            if (a && a->version != ver) asset_free(ctx, a);      /* superseded */
+        if (!id || !ver || ver >= 0x80000000u || akind > ASSET_STRING ||
+            (uint32_t)20 + dl != len || !total || !dl || total > ctx->store_bytes ||
+            offset > total || dl > total - offset) return ST_REFUSED;
+        cfw_asset *a = asset_version(ctx, id, ver);
+        if (a) {
+            if (a->length != total || a->kind != akind) return ST_REFUSED;
+            /* A repeated chunk (the other lens or a retry) is a byte-identical
+             * no-op. It must never rewrite a complete asset or skip a hole. */
+            if (offset < a->filled) {
+                if (dl > a->filled - offset || memcmp(ctx->store + a->offset + offset, e + 20, dl)) return ST_REFUSED;
+                a->pinned = 1;
+                return ST_APPLIED;
+            }
+            if (offset != a->filled || (a->state & 1)) return ST_REFUSED;
+        } else {
+            if (offset) return ST_REFUSED;
+            /* Preserve the displayed version, including under store pressure.
+             * An abandoned incomplete version may be replaced at offset zero. */
+            for (unsigned i = 0; i < CACHE_ASSETS; i++) {
+                cfw_asset *old = &ctx->assets[i];
+                if (old->id != id) continue;
+                if (old->kind != akind) return ST_REFUSED;
+                if (old->state & 1) old->pinned = 1;
+                else asset_free(ctx, old);
+            }
             a = asset_slot(ctx);
             if (!a) return ST_CAPACITY;
             uint32_t base = store_reserve(ctx, total);
@@ -311,21 +381,30 @@ static int put_entry(customCfwContext *ctx, cfw_lens *L, const uint8_t *e, uint3
             a->id = id; a->version = ver; a->kind = akind;
             a->length = total; a->offset = base; a->filled = 0; a->state = 0;
         }
-        a->last_use = ctx->use_clock;
+        a->pinned = 1;
+        a->last_use = ++ctx->use_clock;
         memcpy(ctx->store + a->offset + offset, e + 20, dl);
-        if (offset + dl > a->filled) a->filled = offset + dl;
-        if (a->filled >= a->length && !(a->state & 1)) {
-            a->state |= 1;                           /* complete: both mirrors learn of it */
+        a->filled += dl;
+        if (a->filled == a->length) {
+            if (!asset_content_valid(ctx->store + a->offset, a->length, a->kind)) { ctx->refuse_reason = REFUSE_ASSET; return ST_REFUSED; }
+            a->state |= 1;
+            /* Publish only once the new version is whole. Objects resolve by
+             * id, so both eyes switch together at this commit. */
+            for (unsigned i = 0; i < CACHE_ASSETS; i++) {
+                cfw_asset *old = &ctx->assets[i];
+                if (old != a && old->id == id) asset_free(ctx, old);
+            }
             journal_note(ctx, 0, JOURNAL_ASSET, a->id, a->version);
         }
         return ST_APPLIED;
     }
     if (kind == PUT_OBJECT) {
-        if (len < 9) return ST_REFUSED;
+        if (len < 9 || put_entry_len(e, len) != len) return ST_REFUSED;
         uint32_t id = rd32(e + 1), ver = rd32(e + 5);
+        if (!id || !ver || ver >= 0x80000000u) return ST_REFUSED;
         cfw_object *o = object_find(L, id);
         if (!o) o = object_slot(ctx, L);
-        if (!o) return ST_CAPACITY;
+        if (!o || !txn_save_object(ctx, o)) return ST_CAPACITY;
         uint32_t pid = o->id ? o->id : id;
         uint8_t was_active = o->active, was_pinned = o->pinned;
         if (o->text_len) store_free(ctx, o->text_off, (uint32_t)o->text_len + 1u);
@@ -337,7 +416,7 @@ static int put_entry(customCfwContext *ctx, cfw_lens *L, const uint8_t *e, uint3
         o->flags = OBJ_VISIBLE;
         o->last_use = ++ctx->use_clock;
         int shaped = shape_into(ctx, o, e + 9, len - 9);
-        o->pinned = was_pinned;
+        o->pinned = ctx->transaction ? 1 : was_pinned;
         if (shaped <= 0) {
             /* the previous version is gone with it: the mirror must learn that */
             if (o->id && o->version != ver) journal_note(ctx, L, JOURNAL_OBJECT, o->id, 0);
@@ -428,10 +507,34 @@ static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t
 int cfw_scene_message(customCfwContext *ctx, cfw_lens *L, const uint8_t *msg, uint32_t len,
                       uint8_t *status, uint16_t *request, int first, uint8_t *extra, uint8_t *extra_len) {
     ctx->refuse_reason = 0;
-    L->scene_serial++;             /* whatever this message changes, the static layer is stale */
+    if (len < 5) return 0;
+    int show = msg[0] == MSG_SHOW;
+    int duplicate = show && L->last_show_valid && L->last_show_request == rd16(msg + 3);
+    int transactional = msg[0] == MSG_PUT || (show && len >= 8 && msg[7] && !duplicate);
+    *extra_len = 0;
+    *request = rd16(msg + 3);
+    if (transactional && !txn_begin(ctx)) { *status = ST_CAPACITY; return 1; }
     int handled = scene_message_apply(ctx, L, msg, len, status, request, first, extra, extra_len);
+    int applied = handled && *status == ST_APPLIED;
+    if (ctx->transaction) {
+        txn_end(ctx, applied);
+        if (!applied && *status == ST_CAPACITY && *extra_len) extra[0] = 0; /* evictions rolled back */
+    }
+    if (applied && msg[0] != MSG_STATE && !duplicate) {
+        L->scene_serial++;
+        /* Shared asset changes invalidate the other eye's cached text/images. */
+        for (unsigned e = 0; e < 2; e++) if (ctx->lens[e].mutated) ctx->lens[e].scene_serial++;
+    }
     if (handled && *status == ST_REFUSED && *extra_len == 0 && ctx->refuse_reason) { extra[0] = ctx->refuse_reason; *extra_len = 1; }
     journal_commit(ctx);
+    if (applied && show && !duplicate) {
+        if (msg[5] & SHOW_FLAG_TAG) {
+            cfw_anim_settled(ctx, L);
+            L->settle_tag = *request; L->settle_pending = 1;
+        }
+        cfw_scene_render(ctx, L);
+        cfw_anim_arm(ctx);
+    }
     return handled;
 }
 
@@ -464,7 +567,7 @@ static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t
                 cfw_scene_hide(ctx, &ctx->lens[1]);
             }
             /* [evicted][store KiB u16]: the phone sizes its asset mirror from this */
-            extra[0] = 0; cfw_put16(extra + 1, STORE_KIB); *extra_len = 3;
+            extra[0] = 0; cfw_put16(extra + 1, (uint16_t)(ctx->store_bytes / 1024u)); *extra_len = 3;
             return 1;
         }
         if (epoch != ctx->stream.epoch) { *status = ST_STALE; return 1; }
@@ -502,6 +605,7 @@ static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t
     if (mode == MSG_PUT) {
         /* one entry per PUT message on RayNeo (<= 8192 B); an asset PUT applied
          * for the second lens finds the asset already stored and is a no-op */
+        if (!blen) { *status = ST_REFUSED; return 1; }
         if (blen) { uint8_t r = (uint8_t)put_entry(ctx, L, body, blen); if (r != ST_APPLIED) *status = r; }
         if (*status == ST_APPLIED || *status == ST_CAPACITY) { extra[0] = (uint8_t)(ctx->evicted > 255u ? 255u : ctx->evicted); *extra_len = 1; }
         return 1;
@@ -538,9 +642,12 @@ static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t
         uint16_t count = rd16(body + puts_end);
         if (count > CACHE_OBJECTS || puts_end + 2 + 8u * count > blen) { *status = ST_REFUSED; return 1; }
         if ((flags & SHOW_FLAG_KEEP) && count) { *status = ST_REFUSED; return 1; }
-        for (uint16_t i = 0; i < count; i++) {
+        for (uint16_t i = 0; puts && i < count; i++) {
             cfw_object *o = object_find(L, rd32(body + puts_end + 2 + 8u * i));
-            if (o) o->pinned = 1;
+            if (o) {
+                if (!txn_save_object(ctx, o)) { *status = ST_CAPACITY; return 1; }
+                o->pinned = 1;
+            }
         }
         uint8_t put_status = ST_APPLIED;
         for (uint8_t i = 0; i < puts && off < puts_end; i++) {
@@ -549,7 +656,6 @@ static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t
             if (r != ST_APPLIED) { put_status = r; break; }
             off += elen;
         }
-        for (unsigned i = 0; i < CACHE_OBJECTS; i++) L->objects[i].pinned = 0;
         if (put_status != ST_APPLIED) {
             *status = put_status;
             if (put_status == ST_CAPACITY) { extra[0] = (uint8_t)(ctx->evicted > 255u ? 255u : ctx->evicted); *extra_len = 1; }
@@ -638,14 +744,7 @@ static int scene_message_apply(customCfwContext *ctx, cfw_lens *L, const uint8_t
         L->bg = bg;
         L->last_show_request = *request;
         L->last_show_valid = 1;
-        if (flags & SHOW_FLAG_TAG) {
-            cfw_anim_settled(ctx, L);       /* a superseded tag reports now */
-            L->settle_tag = *request;
-            L->settle_pending = 1;
-        }
         extra[0] = (uint8_t)(ctx->evicted > 255u ? 255u : ctx->evicted); *extra_len = 1;
-        cfw_scene_render(ctx, L);
-        cfw_anim_arm(ctx);
         return 1;
     }
     return 0;
@@ -688,11 +787,23 @@ static void blit_rows(customCfwContext *ctx, const uint8_t *px, uint32_t iw, uin
     for (int j = j0; j < j1; j++) {
         uint8_t *dst = ctx->canvas_buf + (uint32_t)(y + j) * CFW_W + (uint32_t)(x + i0);
         uint32_t n = (uint32_t)j * iw + (uint32_t)i0;
-        for (int i = i0; i < i1; i++, n++, dst++) {
-            uint8_t b = px[n >> 1];
-            uint8_t g = ((n & 1u) ^ (uint32_t)hi_first) ? (b >> 4) : (b & 0x0f);
-            if (transparent && !g) continue;
-            *dst = ink[g];
+        int i = i0;
+        if (n & 1u) {                               /* odd start: one pixel, then byte-aligned pairs */
+            uint8_t g = hi_first ? (px[n >> 1] & 0x0f) : (px[n >> 1] >> 4);
+            if (!transparent || g) *dst = ink[g];
+            i++; n++; dst++;
+        }
+        const uint8_t *src = px + (n >> 1);
+        for (; i + 1 < i1; i += 2, dst += 2, src++) {   /* two pixels per byte; a blank byte of a glyph costs one test */
+            uint8_t b = *src;
+            if (transparent && !b) continue;
+            uint8_t g0 = hi_first ? (b >> 4) : (b & 0x0f), g1 = hi_first ? (b & 0x0f) : (b >> 4);
+            if (!transparent || g0) dst[0] = ink[g0];
+            if (!transparent || g1) dst[1] = ink[g1];
+        }
+        if (i < i1) {
+            uint8_t g = hi_first ? (*src >> 4) : (*src & 0x0f);
+            if (!transparent || g) *dst = ink[g];
         }
     }
 }
@@ -784,7 +895,7 @@ static int draw_font_text(customCfwContext *ctx, const uint8_t *font, uint32_t f
         if (ch >= 32u + chars) ch = '?';
         uint32_t off = rd32(font + (ch - 32u) * 4u);
         if (off == 0 && ch != '?') { ch = '?'; off = rd32(font + (ch - 32u) * 4u); }   /* no glyph (0x80..0x9F) */
-        if (off == 0 || off + 3u > flen) return 0;
+        if (off == 0 || off > flen - 3u) return 0;
         uint32_t w = font[off], h = font[off + 1];
         if (raw) {
             uint32_t rowbytes = (w + 1u) / 2u;
@@ -824,6 +935,7 @@ static void draw_text(customCfwContext *ctx, cfw_object *o) {
 
 void cfw_scene_hide(customCfwContext *ctx, cfw_lens *L) {
     L->raster = 0;
+    L->canvas_valid = 0;
     if (L->canvas) cfw_zero(L->canvas, (uint32_t)CFW_W * CFW_H);
     cfw_page_present(ctx);
 }
@@ -866,9 +978,33 @@ static uint16_t static_prefix(const cfw_lens *L) {
     return L->active_count;
 }
 
-void cfw_scene_render(customCfwContext *ctx, cfw_lens *L) {
-    if (!L->canvas) return;
-    L->raster = 0;                               /* the scene owns the canvas again */
+/* Flat pages have identical per-eye scenes. Reuse the finished other eye
+ * instead of rasterizing every glyph/shape twice. Compare actual draw state,
+ * not ids/versions: two equal definitions may be at different tween phases. */
+static int scene_same(customCfwContext *ctx, const cfw_lens *a, const cfw_lens *b) {
+    if (!b->canvas || !b->canvas_valid || b->raster || b->canvas_serial != b->scene_serial ||
+        a->bg != b->bg || a->active_count != b->active_count) return 0;
+    for (uint32_t k = 0; k < a->active_count; k++) {
+        const cfw_object *x = &a->objects[a->active_list[k]], *y = &b->objects[b->active_list[k]];
+        if (x->type != y->type || x->flags != y->flags || x->color != y->color || x->width != y->width ||
+            x->asset_id != y->asset_id || x->font_id != y->font_id || memcmp(x->p, y->p, sizeof(x->p)) ||
+            x->rotation.angle != y->rotation.angle || x->rotation.px != y->rotation.px || x->rotation.py != y->rotation.py ||
+            x->text_len != y->text_len || x->path_bytes != y->path_bytes) return 0;
+        if (x->text_len && memcmp(ctx->store + x->text_off, ctx->store + y->text_off, x->text_len)) return 0;
+        if (x->path_bytes && memcmp(ctx->store + x->path_off, ctx->store + y->path_off, x->path_bytes)) return 0;
+    }
+    return 1;
+}
+
+static void scene_render_canvas(customCfwContext *ctx, cfw_lens *L) {
+    const cfw_lens *other = L == &ctx->lens[0] ? &ctx->lens[1] : &ctx->lens[0];
+    if (scene_same(ctx, L, other)) {
+        memcpy(L->canvas, other->canvas, (uint32_t)CFW_W * CFW_H);
+        L->base_valid = 0;
+        ctx->scene_copies++;
+        return;
+    }
+    ctx->scene_renders++;
     ctx->canvas_buf = L->canvas;
     uint16_t prefix = static_prefix(L);
     int cached = L->base && prefix && L->base_valid && L->base_count == prefix && L->base_serial == L->scene_serial;
@@ -888,6 +1024,18 @@ void cfw_scene_render(customCfwContext *ctx, cfw_lens *L) {
     }
     for (uint16_t k = prefix; k < L->active_count; k++) render_object(ctx, &L->objects[L->active_list[k]]);
     ctx->canvas_buf = 0;
+}
+
+void cfw_scene_render(customCfwContext *ctx, cfw_lens *L) {
+    if (!L->canvas) return;
+    uint32_t started = fw_tick();
+    L->raster = 0;
+    scene_render_canvas(ctx, L);
+    L->canvas_serial = L->scene_serial;
+    L->canvas_valid = 1;
+    uint32_t elapsed = fw_tick() - started;
+    ctx->scene_last_ms = elapsed > 65535u ? 65535u : (uint16_t)elapsed;
+    if (ctx->scene_last_ms > ctx->scene_max_ms) ctx->scene_max_ms = ctx->scene_last_ms;
     cfw_page_present(ctx);
 }
 
@@ -903,6 +1051,7 @@ void cfw_scene_takeover(customCfwContext *ctx, cfw_lens *L) {
     L->last_show_valid = 0;
     cfw_anim_settled(ctx, L);
     L->raster = 1;
+    L->canvas_valid = 0;
     L->scene_serial++;
 }
 

@@ -127,14 +127,37 @@ static int g_rrect_span(int32_t x, int32_t y, int32_t w, int32_t h, int32_t rad,
     return *l < *r;
 }
 
-/* Rounded rectangle: filled when wd <= 0, else a border of width wd. */
+/* Write gray over the pixel span [a, b) of row y, clipped to the canvas. */
+static void g_hspan(customCfwContext *ctx, int32_t y, int32_t a, int32_t b) {
+    if (y < 0 || y >= CFW_H) return;
+    if (a < 0) a = 0;
+    if (b > CFW_W) b = CFW_W;
+    if (a >= b) return;
+    memset(ctx->canvas_buf + (uint32_t)y * CFW_W + (uint32_t)a, ctx->draw_gray, (size_t)(b - a));
+}
+
+/* Rounded rectangle: filled when wd <= 0, else a border of width wd. Rows
+ * between the corner arcs are straight runs at integer coordinates, so the
+ * coverage pass would only ever find full pixels there: they are written
+ * directly (a full-canvas card border used to cost more than eight lines
+ * of text). The corner rows keep the anti-aliased pass. */
 static void g_rrect(customCfwContext *ctx, int32_t x, int32_t y, int32_t w, int32_t h, int32_t rad, int32_t wd) {
     if (w <= 0 || h <= 0) return;
     int inner = wd > 0 && w > 2 * wd && h > 2 * wd;
     int32_t y0 = y < 0 ? 0 : y, y1 = y + h;
     if (y1 > CFW_H) y1 = CFW_H;
+    int32_t maxr = (w < h ? w : h) / 2;
+    int32_t crad = rad > maxr ? maxr : (rad < 0 ? 0 : rad);
+    int32_t straight0 = y + crad, straight1 = y + h - crad;   /* rows [straight0, straight1) have no corner arc */
     g_row r;
     for (int32_t row = y0; row < y1; row++) {
+        if (row >= straight0 && row < straight1) {
+            if (!inner) { g_hspan(ctx, row, x, x + w); continue; }
+            if (row < y + wd || row >= y + h - wd) { g_hspan(ctx, row, x, x + w); continue; }   /* top / bottom band */
+            g_hspan(ctx, row, x, x + wd);
+            g_hspan(ctx, row, x + w - wd, x + w);
+            continue;
+        }
         g_row_begin(&r);
         for (int32_t s = 0; s < GSUB; s++) {
             int32_t ys = g_sub_y(row, s), ol, orr, il, ir;

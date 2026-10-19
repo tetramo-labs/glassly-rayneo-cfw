@@ -58,17 +58,17 @@ static uint8_t an_sat8(int32_t v) { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 
 
 /* ---- per-type parameter roles (G2 shapes.c) -------------------------------- */
 /* Which params are x / y coordinates (glides translate exactly these). */
-static const uint8_t an_xmask_tab[18] = {
+static const uint8_t an_xmask_tab[19] = {
     0x00, 0x05, 0x01, 0x01, 0x01, 0x01, 0x15, 0x15, 0x55, 0x55,
-    0x15, 0x55, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x15, 0x55, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
 };
-static const uint8_t an_ymask_tab[18] = {
+static const uint8_t an_ymask_tab[19] = {
     0x00, 0x0a, 0x02, 0x02, 0x02, 0x02, 0x2a, 0x2a, 0xaa, 0xaa,
-    0x2a, 0xaa, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+    0x2a, 0xaa, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
 };
 
 static void an_masks(uint8_t type, uint8_t *xm, uint8_t *ym) {
-    if (type >= 18) type = 0;
+    if (type > SH_PATH) type = 0;
     *xm = an_xmask_tab[type];
     *ym = an_ymask_tab[type];
 }
@@ -360,24 +360,32 @@ void cfw_anim_tick(customCfwContext *ctx) {
     if (steps > ANIM_CATCH_UP) { steps = ANIM_CATCH_UP; ctx->anim_last_tick = now - period * ANIM_CATCH_UP; }
     ctx->anim_last_tick += steps * period;
     ctx->anim_steps = (uint16_t)(ctx->anim_steps + steps);
-    int moving = 0;
+    int moving = 0, rendered = 0;
+    /* One stereo frame: snapshot backpressure before either lens renders. */
+    int pending = ctx->disp_pan_pending;
+    uint8_t hold = ctx->disp_hold;
+    ctx->disp_hold = 1;
     for (unsigned e = 0; e < 2; e++) {
         cfw_lens *L = &ctx->lens[e];
         if (L->raster || !cfw_anim_any(L)) continue;
         int still = 0;
         for (uint32_t s = 0; s < steps; s++) { still = an_advance(L); if (!still) break; }
+        L->canvas_valid = 0; /* keep the static prefix cached, but do not copy stale motion */
         if (still) moving = 1;
         /* a frame the display thread could not show yet is not worth drawing
          * (the G2 skips frames while its display task is busy); the final
          * frame always lands */
-        if (still && ctx->disp_pan_pending && !(ctx->tuning & TUNE_RENDER_ALWAYS)) { ctx->anim_skipped++; continue; }
+        if (still && pending && !(ctx->tuning & TUNE_RENDER_ALWAYS)) { ctx->anim_skipped++; continue; }
         uint32_t t0 = fw_tick();
         cfw_scene_render(ctx, L);
+        rendered = 1;
         uint32_t took = fw_tick() - t0;
         if (took > ctx->anim_render_max_ms) ctx->anim_render_max_ms = took > 255u ? 255u : (uint8_t)took;
         ctx->anim_renders++;
         if (!cfw_anim_any(L)) cfw_anim_settled(ctx, L);
     }
+    ctx->disp_hold = hold;
+    if (rendered && !hold) cfw_page_present(ctx);
     if (!moving) cfw_anim_stop(ctx);
 }
 

@@ -420,6 +420,29 @@ In order:
     scene (255 ms+ per lens) delays an animation's start, and presents are
     bounded by the display thread's compose (~55 ms) when the panel is
     accepting frames.
-Not applicable: mic routing, R1 ring, ALS, BLE link profile, the Cordio
+13. Revision 10 (2026-10-17): the mic. The stock mic channel (business 13)
+    only streams Opus inside a voice-assistant session the glasses open
+    themselves (wake word, temple long/double press), and the page's button
+    interceptor swallows those presses, so the Glassly App never received a
+    frame: `{"rc":1}` (type 2) outside a session is a no-op. The assistant's
+    MessageProcessor also has AUDIO_STREAM_CONTROL (type 58, `{"rc":1|2}`)
+    which opens a second recorder client that forwards every Opus frame as
+    AUDIO_STREAM_SEND (type 59) with no assistant page, gated by
+    StateMonitorAdapter::isRemoteAudioStreamAllowed, a stock `return 0` stub.
+    The build flips that stub to `return 1` (2 bytes, resolved by name,
+    body asserted) and IDENT advertises bit 5; the phone sends type 58 on
+    such firmware, decodes type 59 like type 3, and sets the launcher's
+    `set_ai_voice_wakeup` to 0 so the wake word never opens the stock page.
+    The remaining gates are the firmware's own: no voice session, no phone
+    call or SCO link, no recording. Not hardware-validated yet. Also in
+    revision 10: the object store is sized at context creation as the largest
+    of 256/192/128/96/64 KiB the heap grants (the G2 rule; IDENT, STATE and
+    DIAG report what was obtained), and DIAG carries the stock heap's
+    mallinfo (arena, free, largest free block, in use) so the budget can be
+    read instead of guessed: the CFW already holds ~740 KB (two L8 canvases
+    and two static-layer caches at 118,800 B each, the 78 KB context, the
+    64 KiB record buffer, the inflater, plus a transient 64 KiB per
+    compressed record).
+Not applicable: R1 ring, ALS, BLE link profile, the Cordio
 keyboard bridge, the protobuf settings channel (business 0xF0 and the stock
 inflater replace them).

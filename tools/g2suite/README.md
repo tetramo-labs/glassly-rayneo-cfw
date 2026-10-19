@@ -21,6 +21,8 @@ G2_TRACE=1 bun shapes-suite.ts      # per-frame op counts and timings
 bun vector-suite.ts                 # SVG paths and rotation (vector-cases.ts), revision 6
 bun cache-state.ts                  # the journal: STATE, DROP, PERIOD (revision 6)
 bun raster-replay.ts <dump dir>     # the phone driver's raster keyframe + delta (revision 7)
+bun scene-timing.ts                 # screen opening/update ACK latency + v11 render diagnostics
+bun scene-timing.ts --dry-run       # offline payload/packet sizes
 bun anim-timing.ts                  # glide settle times vs nominal, with the firmware's frame statistics (revision 8)
 ```
 

@@ -266,7 +266,11 @@ static void cfw_packet(customCfwContext *ctx, uint8_t opt, uint8_t stream, const
         ctx->stream.used = 0; ctx->stream.in_stream = 1; ctx->stream.ordinal = 0;
         ctx->stream.stream_id = stream;
     }
+    uint8_t hold = ctx->disp_hold;
+    ctx->disp_hold = 1; /* a packet may finish both eyes' SHOW records */
     if (len) stream_feed(ctx, chunk, len);
+    ctx->disp_hold = hold;
+    if (!hold && ctx->disp_dirty) cfw_page_present(ctx);
     if (opt & PKT_END) { ctx->stream.used = 0; ctx->stream.in_stream = 0; }
 }
 

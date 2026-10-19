@@ -93,9 +93,10 @@ ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/9"[00][lineHeight u8]   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes, bit 4 = raster family; the NUL and the builtin font's line pitch in px follow the name since revision 8)
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/11"[00][lineHeight u8]   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes, bit 4 = raster family, bit 5 = remote mic stream; the NUL and the builtin font's line pitch in px follow the name since revision 8)
 PAGE  [13][state u8][reason u8]
-DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32]
+DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32][arena u32][free u32][largest u32][inuse u32][storeKiB u16]   (the heap fields since revision 10: mallinfo of the stock heap; storeKiB = the store the heap granted)
+       [sceneRenders u32][sceneCopies u32][sceneLastMs u16][sceneMaxMs u16] (revision 11; appended at byte 39)
 ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification relay, ancs.c)
 DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16][nplanes u8][fbmem u32][fblen u32][stride u16][display u8][bpp u8][xresV u32][yresV u32][xoff u32][yoff u32][map u32][buf2 u32][yoff2 u32][cf u8][w u32][h u32][drawStride u32][refrPass u8][leftParallax i32][rightParallax i32][depthMode i32][dispMode i32][lcdc b5 b6 b7 b8]   (display probe, disp.c; tooling only, the phone ignores it)
 ```
@@ -107,12 +108,18 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
   frame's left and right SHOWs into one stream (ordinals 0 and 1) so both
   lenses apply them in the same handler call; each lens acks and replies to
   the record addressed to it.
-* IDENT: `ver=7`, `w=540`, `h=220`, `maxChunk=240`, `storeKiB=64`, `revision=7`,
-  `flags = 0x1F` normally. Flag bits: **bit0** = zlib COMPRESSED records
+* IDENT: `ver=7`, `w=540`, `h=220`, `maxChunk=240`, `storeKiB` = 64..256 (revision 10 takes the largest of 256/192/128/96/64 KiB the heap grants; before it was a fixed 64), `revision=7`,
+  `flags = 0x3F` normally. Flag bits: **bit0** = zlib COMPRESSED records
   accepted (the stock inflater is used); **bit1** = raw packets accepted on
   business 0xF0; **bit2** = the heap context existed when IDENT was built
   (diagnostic; the phone only logs it); **bit3** = stereo (a scene per lens);
-  **bit4** = the direct-framebuffer family is accepted (revision 7).
+  **bit4** = the direct-framebuffer family is accepted (revision 7);
+  **bit5** = the stock assistant's remote audio stream is allowed (revision
+  10): business 13 type 58 `{"rc":1}` opens it and `{"rc":2}` closes it, the
+  glasses then send 16 kHz mono Opus packets as business 13 type 59 (field 4)
+  with no assistant page, until a voice session, a call, SCO or a recording
+  takes the recorder. Stock firmware answers type 58 with "open rejected"
+  (its gate is a `return 0` stub) and only streams inside a wake session.
 * DIAG is a diagnostics reply the phone logs. `source` 1 = sent directly from
   the RNLink RX callback (right after IDENT), 2 = queued from the LVGL message
   handler (proves the thread hop). `entry` is the module's RNLink registry
@@ -190,3 +197,26 @@ and drained right after the packet that produced them and on every 25 ms page
 tick (revision 8; revisions 5-7 spaced them 25 ms apart, earlier ones 100 ms). IDENT and the first DIAG bypass the queue: they are
 sent from the RX callback itself (the stock RX path sends its own
 acknowledgements from that context through the same protocol layer).
+
+
+## Revision 11 cache and rendering guarantees
+
+PUT and SHOW with inline PUTs are transactions: refusal, missing references or
+capacity failure restores objects, assets, eviction state and journals. Store
+bytes live at message entry are backed up only when overwritten; animation-only
+SHOWs do not allocate transaction state. Both lens scenes share the asset store.
+
+Asset chunks must preserve id, version, kind and total size, start at offset zero,
+and append contiguously. A byte-identical already-received chunk is an idempotent
+retry (including the second lens processing the same record); conflicting bytes,
+holes, zero-length uploads and overflowing ranges are refused. A replacement
+keeps the old complete version visible until the new upload is whole and its
+image/font contents validate. If there is no room for both versions, CAPACITY
+preserves the old one. Invalid completed uploads do not publish.
+
+PATH MOVE/GLIDE translate p0/p1. An animation tick makes one backpressure decision
+for both lenses, renders them under a presentation hold, then requests one
+presentation. Equal draw states may copy the other eye's current canvas; differing
+positions, text, assets or rotations still render independently. STATE queries do
+not invalidate the static-layer cache. DIAG appends render/copy counts and the
+last/maximum scene render time in ms; old reply prefixes are unchanged.

@@ -3,11 +3,18 @@
 Custom firmware ("Glassly CFW") for the **RayNeo iO** smart glasses
 (Bestechnic BES2800, NuttX-based Strix OS 1.0.4.12). It patches the stock
 application image `nuttx_ap.bin` to add one thing: a Glassly link on BLE business
-`0xF0` that drives a 540×180 on-glass page from the phone (the Glassly App) and
+`0xF0` that drives a 540×220 on-glass page from the phone (the Glassly App) and
 forwards touch/crown gestures back. It is the firmware counterpart of the
 phone-side RayNeo iO support in the Glassly repo.
 
-**Revision: `GLASSLYCFW-IO/4`** (built, not yet flashed; revision 3 is the last build verified on hardware and the one the app bundles).
+**Revision: `GLASSLYCFW-IO/11`** (host-tested and built; v11 has not been flashed or hardware-validated).
+
+Revision 11 fixes asset-upload bounds and holes, retains the previous asset until
+its replacement completes and validates, rolls failed PUT/SHOW mutations back,
+updates both animated eyes before presenting, and restores PATH MOVE/GLIDE.
+It also avoids duplicate rasterization of identical eye scenes, uses aligned
+canvas memory operations and packs four L8 pixels per display-conversion step.
+See [v11 validation and performance findings](docs/V11.md).
 
 > ⚠️ **Experimental.** Revision 3 is verified on a RayNeo iO (2026-10-09): it
 > answers QUERY with IDENT and DIAG from the RNLink receive callback, keeps its
@@ -112,6 +119,8 @@ no verified recovery path.
 
 ```
 ./venv/bin/python -m pytest tools/            # protocol codecs + state machine
+bash tools/host/run_cache_tests.sh           # uploads, transactions, animation, flat-eye reuse
+bash tools/host/run_memory_tests.sh          # aligned memory ops + LCDC pixel packing
 ./venv/bin/python patches/apply_patches.py --verify   # patch replay round-trip
 cd tools/suite && swift run rayneo-io-suite   # on the glasses: link, cfw, page, scene (after every flash)
 ```
