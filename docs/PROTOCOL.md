@@ -126,15 +126,36 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
   entry, `ctx` the heap context, `uiModule` the message-processor id in use,
   `regRc`/`sendRc` the last registration/send results, `timer` the LVGL
   service timer, `tick` `os_get_tick_count()`.
-* ANCS: the JSON the stock firmware's ANCS client builds for one iOS
-  notification (`notificationUID`, `appId`, `appName`, `title`, `subtitle`,
-  `content`, `location`, `carrier`, `timestamp` `yyyyMMdd'T'HHmmss`, `eventId`
-  0 added / 1 modified / 2 removed, `eventFlags` bit2 = pre-existing, bit1 =
-  important, `categoryID`, `categoryCount`), split into <= 185-byte chunks with
-  one `seq`; reassemble by (seq, offset) until offset + chunk == total. Sent
+* ANCS: the stock notification JSON, split into <= 185-byte chunks with
+  one `seq`; reassemble by (seq, offset) until offset + chunk == total. The
+  current hook receives `receivedNotificationToJson` output: `type`,
+  `notificationUID`, `appId`, `appName`, `title`, `subtitle`, `phoneNumber`,
+  `content`, `timestamp` (`yyyyMMdd'T'HHmmss`), `category`, and `reply`.
+  It does **not** receive the raw ANCS JSON with `eventId`, `eventFlags`,
+  `categoryID`, and `categoryCount` described by the original hook comments.
+  Do not assume this hook forwards removal events or original ANCS flags. Sent
   only after a QUERY on this connection; a notification that does not fit the
   free uplink slots is dropped whole. Testable only from an iPhone (macOS has
   no ANCS server).
+  The iOS app must request `CBConnectPeripheralOptionRequiresANCS` on both
+  discovery and saved-device connections; the firmware hook does not request
+  iOS authorization. Check `CBPeripheral.ancsAuthorized` separately from CFW
+  detection. Stock ANCS subscription also requires notifications enabled and
+  phone time synchronized: `NotificationService::reconcileANCSState`
+  (`0x106f5950`) gates subscription on both, and `onPhoneTimeSynchronized`
+  (`0x106f5cb8`) unlocks it. Send launcher business 15, **type 5**, with
+  `cmd: "sync_time"` and `payload: {value: 0, mode: 0, data: <JSON string>}`.
+  The nested JSON has `utc` (Unix seconds as a string), `offset` (signed seconds
+  east of UTC, including DST), and `timezone` (timezone identifier).
+  `handleSyncTimeCommand` (`0x106ec2a8`) applies it without an acknowledgement;
+  launcher **type 6** is the glasses' request for the phone to send this setting.
+  To validate on hardware, connect with notification sharing allowed,
+  send the time setting and enable notifications,
+  confirm IDENT and the queued DIAG (`source = 2`), then receive a **new** iPhone
+  notification and check for ANCS records and the app's `phone_notification`
+  event. Repeat after reconnecting through the saved-device path. Existing
+  notifications replayed at subscription time are intentionally ignored by the
+  app. This authorization path still requires an iPhone hardware check.
 * SETTLED `[09][tag u16 LE][elapsed ms u16][ticks u16][frames u16][renders u16][pans u16][presented u16][renderMax ms u8][tickGapMax ms u8][gate u8][composeMax ms u8][updateMax ms u8][skipped u16]`:
   the request id of a TAG-flagged SHOW (or HIDE) once every animation it
   started has ended, immediately when none did, followed (revision 8) by the
