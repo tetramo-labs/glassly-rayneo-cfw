@@ -20,6 +20,7 @@
 #include "anim.c"
 #include "ident.c"
 #include "input.c"
+#include "head.c"
 #include "page.c"
 #include "link.c"
 #include "ancs.c"

@@ -246,6 +246,9 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl, uint8_t arg) {
             cfw_send_page_state(ctx, 1, PAGE_OK);
         }
         break;
+    case CTRL_HEAD_ANGLE:
+        cfw_head_angle(arg);
+        break;
     case CTRL_COMPASS:
         cfw_compass_control(ctx, arg);
         break;
@@ -259,7 +262,8 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl, uint8_t arg) {
 /* ---- one stream packet (opt, stream, chunk) -------------------------------- */
 static void cfw_packet(customCfwContext *ctx, uint8_t opt, uint8_t stream, const uint8_t *chunk, uint32_t len) {
     if (opt & PKT_CONTROL) {
-        if (len >= 1) cfw_control(ctx, chunk[0], len >= 2 ? chunk[1] : 0u);
+        if (len >= 1 && (chunk[0] != CTRL_HEAD_ANGLE || len >= 2))
+            cfw_control(ctx, chunk[0], len >= 2 ? chunk[1] : 0u);
         return;
     }
     if (opt & PKT_RESET) {

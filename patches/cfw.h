@@ -60,6 +60,24 @@ static inline void *fw_input_monitor(void) {
     void *mm = FW(void *(*)(void), FWA_monitor_manager_instance)();
     return mm ? FW(void *(*)(void *), FWA_monitor_manager_input)(mm) : 0;
 }
+/* Stock head configuration uses integer preferences; applyWakeupConfig owns
+ * the hard-float sensor RPC ABI. Only head keys are changed, never crown. */
+static inline void *fw_sysstate_monitor(void) {
+    void *mm = FW(void *(*)(void), FWA_monitor_manager_instance)();
+    return mm ? FW(void *(*)(void *), FWA_monitor_manager_sysstate)(mm) : 0;
+}
+static inline void fw_notify_head(void *monitor, uint32_t direction) {
+    FW(void (*)(void *, uint32_t), FWA_sysstate_notify_head)(monitor, direction);
+}
+static inline int fw_pref_read(uint32_t key, int32_t *value) {
+    return FW(int (*)(uint32_t, int32_t *), FWA_preference_read)(key, value);
+}
+static inline int fw_pref_write(uint32_t key, int32_t value) {
+    return FW(int (*)(uint32_t, int32_t), FWA_preference_write)(key, value);
+}
+static inline void fw_apply_wakeup(void *monitor) {
+    FW(void (*)(void *), FWA_sysstate_apply_wakeup)(monitor);
+}
 static inline int fw_wheel_register(void *monitor, void *fn, void *user) {
     return FW(int (*)(void *, void *, void *), FWA_input_register_wheel)(monitor, fn, user);
 }
@@ -178,9 +196,9 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 11u
-#define REV_TEXT  "11"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
-#define REV_STRING "GLASSLYCFW-IO/11"
+#define REV_MAJOR 12u
+#define REV_TEXT  "12"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
+#define REV_STRING "GLASSLYCFW-IO/12"
 #define MAX_CHUNK 240u
 /* The store is the largest of 256/192/128/96/64 KiB the heap grants at context
  * creation (ctx.c); IDENT, STATE and DIAG report the size obtained. */
@@ -195,7 +213,8 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define IDENT_FLAG_STEREO   0x08u  /* two lens scenes: records carry a lens mask (revision 5) */
 #define IDENT_FLAG_RASTER   0x10u  /* the direct-framebuffer family (modes 3/6/8/9/11/15/19/20/36, raster.c; revision 7) */
 #define IDENT_FLAG_MIC      0x20u  /* the assistant's remote audio stream is allowed: business 13 type 58 {"rc":1|2} opens/closes it, Opus frames arrive as type 59 (revision 10) */
-#define IDENT_FLAGS         (IDENT_FLAG_ZLIB | IDENT_FLAG_RAW_0XF0 | IDENT_FLAG_STEREO | IDENT_FLAG_RASTER | IDENT_FLAG_MIC)
+#define IDENT_FLAG_HEAD     0x40u  /* real head events + angle control (revision 12) */
+#define IDENT_FLAGS         (IDENT_FLAG_ZLIB | IDENT_FLAG_RAW_0XF0 | IDENT_FLAG_STEREO | IDENT_FLAG_RASTER | IDENT_FLAG_MIC | IDENT_FLAG_HEAD)
 #define RAW_MAX_BYTES 4096u        /* one frame payload: [opt][stream][chunk <= MAX_CHUNK] */
 #define CFW_STORE_MAX_BYTES (STORE_KIB_MAX * 1024u)
 
@@ -211,6 +230,7 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 #define CTRL_KEEPALIVE  4u
 #define CTRL_DISPLAY_PROBE 5u   /* [0x10][stream][5][mode]: disp.c, revision 5 probe */
 #define CTRL_COMPASS    6u      /* [0x10][stream][6][arg]: compass.c (bits 0-1 mode, 4-5 forward axis, 6 negate, 7 mirror) */
+#define CTRL_HEAD_ANGLE 7u      /* [0x10][stream][7][degrees 0..90]: enable and configure stock head detector */
 /* display probe modes */
 #define DISP_REPORT       0u
 #define DISP_FB_PATTERN   1u
@@ -368,6 +388,8 @@ typedef struct {
 #define GEST_SWIPE_DOWN 2u
 #define GEST_DOUBLE 3u
 #define GEST_TAP_HOLD 11u
+#define GEST_HEAD_UP 12u
+#define GEST_HEAD_DOWN 15u
 /* PAGE reason codes */
 #define PAGE_OK 0u
 #define PAGE_BUSY 1u
@@ -637,6 +659,8 @@ void cfw_screen_state_cb(int old_state, int new_state, int reason);
 void cfw_input_wheel_listen(customCfwContext *ctx, int on);
 void cfw_input_btn_listen(customCfwContext *ctx);
 void cfw_input_poll(customCfwContext *ctx);
+void cfw_head_hook(void *monitor, uint32_t direction);
+void cfw_head_angle(uint8_t angle);
 void cfw_gesture(customCfwContext *ctx, uint8_t type, uint8_t source);
 
 /* ident.c */

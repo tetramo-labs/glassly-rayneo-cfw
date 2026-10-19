@@ -93,7 +93,7 @@ ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/11"[00][lineHeight u8]   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes, bit 4 = raster family, bit 5 = remote mic stream; the NUL and the builtin font's line pitch in px follow the name since revision 8)
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/12"[00][lineHeight u8]   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes, bit 4 = raster family, bit 5 = remote mic stream, bit 6 = head gestures + angle control; the NUL and the builtin font's line pitch in px follow the name since revision 8)
 PAGE  [13][state u8][reason u8]
 DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32][arena u32][free u32][largest u32][inuse u32][storeKiB u16]   (the heap fields since revision 10: mallinfo of the stock heap; storeKiB = the store the heap granted)
        [sceneRenders u32][sceneCopies u32][sceneLastMs u16][sceneMaxMs u16] (revision 11; appended at byte 39)
@@ -108,8 +108,8 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
   frame's left and right SHOWs into one stream (ordinals 0 and 1) so both
   lenses apply them in the same handler call; each lens acks and replies to
   the record addressed to it.
-* IDENT: `ver=7`, `w=540`, `h=220`, `maxChunk=240`, `storeKiB` = 64..256 (revision 10 takes the largest of 256/192/128/96/64 KiB the heap grants; before it was a fixed 64), `revision=7`,
-  `flags = 0x3F` normally. Flag bits: **bit0** = zlib COMPRESSED records
+* IDENT: `ver=12`, `w=540`, `h=220`, `maxChunk=240`, `storeKiB` = 64..256 (revision 10 takes the largest of 256/192/128/96/64 KiB the heap grants; before it was a fixed 64), `revision=12`,
+  `flags = 0x7F` normally. Flag bits: **bit0** = zlib COMPRESSED records
   accepted (the stock inflater is used); **bit1** = raw packets accepted on
   business 0xF0; **bit2** = the heap context existed when IDENT was built
   (diagnostic; the phone only logs it); **bit3** = stereo (a scene per lens);
@@ -120,6 +120,7 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
   with no assistant page, until a voice session, a call, SCO or a recording
   takes the recorder. Stock firmware answers type 58 with "open rejected"
   (its gate is a `return 0` stub) and only streams inside a wake session.
+* IDENT **bit6** = real head up/down events and HEAD_ANGLE control (revision 12).
 * DIAG is a diagnostics reply the phone logs. `source` 1 = sent directly from
   the RNLink RX callback (right after IDENT), 2 = queued from the LVGL message
   handler (proves the thread hop). `entry` is the module's RNLink registry
@@ -181,7 +182,13 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
   `[1d][ax ay az][gx gy gz][mx my mz][heading u16][accuracy]` (i16 LE: accel
   x1000, gyro x100, mag x100) every 100 ms in raw mode, for calibration.
 * GESTURE `eventType`: 0 single_tap, 1 swipe_up, 2 swipe_down, 3 double_tap,
-  11 tap_then_hold; `source` 0 touchpad/crown, 1 button.
+  11 tap_then_hold, 12 head_up, 15 head_down; `source` 0 touchpad/crown,
+  1 button, 2 head detector. Head events (revision 12, IDENT bit 6) are relayed
+  after QUERY even with the page closed; the stock handler still runs.
+* HEAD_ANGLE control `[10][stream][07][degrees]` (revision 12, IDENT bit 6):
+  enables the stock head detector and applies the threshold, clamped to 0..90.
+  The argument is required; a truncated control is ignored. Head preferences
+  persist, and crown wake is untouched. No reply is defined for this control.
 * PAGE `state` 1 open/0 closed; `reason` 0 ok, 1 launcher busy, 2 not paired (no longer sent),
   3 lease expired, 4 user backed out.
 

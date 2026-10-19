@@ -47,6 +47,11 @@ AP_SHA = "53afdf5298815849eafca6f315a70606d2a605aff2e563f79050f797d615a988"
 # more than once in the table (e.g. two zlib copies); the chosen zlib cluster is
 # 0x10835xxx (inflateInit2_ / inflate / inflateEnd sit together there).
 FW_SYMBOLS = [
+    ("sysstate_notify_head", "rayneo::service::launcher::SysStateMonitor::notifyHeadUpDownEvent", 0x106DD4A9),
+    ("monitor_manager_sysstate", "rayneo::service::launcher::MonitorManager::getSysStateMonitor", 0x106E8471),
+    ("sysstate_apply_wakeup", "rayneo::service::launcher::SysStateMonitor::applyWakeupConfig", 0x106DCC2D),
+    ("preference_read", "preference_read", 0x107D6C91),
+    ("preference_write", "preference_write", 0x107D6C21),
     ("memalign", "memalign", None),
     ("free", "free", None),
     ("rnlink_if_send_payload", "rnlink_if_send_payload", None),
@@ -131,6 +136,9 @@ FW_SYMBOLS = [
 SHIM_SITE = 0x106D9D1A           # 10-byte inline sequence -> bl cfw_register_shim
 SHIM_STOCK = bytes.fromhex("00241f48204b84610360")
 # Pointer constants the shim relies on; verified so a rebase that moves them fails.
+# Launcher UI-thread head event dispatch, preserving the stock handler.
+HEAD_SITE = 0x106EB518
+HEAD_STOCK_TARGET = 0x106DD4A9
 # ANCS relay: the one `bl handleAncsNotificationReceived` inside
 # NotificationMessageHandler::handleMessage -> bl cfw_ancs_hook (ancs.c).
 ANCS_SITE = 0x10702E7E
@@ -525,6 +533,13 @@ def build_ap(ap, src=None):
     ops.append({"offset": off(ANCS_SITE), "old": ancs_stock.hex(), "new": ancs_new.hex(),
                 "desc": "NotificationMessageHandler::handleMessage: bl handleAncsNotificationReceived -> cfw_ancs_hook (ANCS relay)"})
 
+    head_stock = _branch_bytes(HEAD_SITE, HEAD_STOCK_TARGET, link=True)
+    if ap[off(HEAD_SITE):off(HEAD_SITE) + 4] != head_stock:
+        raise BuildError("head hook site is not `bl SysStateMonitor::notifyHeadUpDownEvent`")
+    head_new = _branch_bytes(HEAD_SITE, (module_va + funcs["cfw_head_hook"]) | 1, link=True)
+    ops.append({"offset": off(HEAD_SITE), "old": head_stock.hex(), "new": head_new.hex(),
+                "desc": "LauncherThreadMsgHandler::handleHeadUpDownEvent -> cfw_head_hook (preserves stock handler)"})
+
     # 2c. Display present: retarget both layer_update calls in pandisp_exec.
     lcdc_hooks = []
     for site in LCDC_SITES:
@@ -583,6 +598,8 @@ def build_ap(ap, src=None):
                    "purpose": "call cfw_register_shim from LinkMonitor::registerLinkCallback"},
                   {"site": hex(ANCS_SITE), "len": 4, "old": ancs_stock.hex(), "new": ancs_new.hex(),
                    "purpose": "call cfw_ancs_hook instead of handleAncsNotificationReceived (tail-calls it)"},
+                  {"site": hex(HEAD_SITE), "len": 4, "old": head_stock.hex(), "new": head_new.hex(),
+                   "purpose": "relay head up/down on the launcher thread and preserve stock handling"},
                   *lcdc_hooks],
     }
     return patched, ops, info

@@ -7,7 +7,10 @@ application image `nuttx_ap.bin` to add one thing: a Glassly link on BLE busines
 forwards touch/crown gestures back. It is the firmware counterpart of the
 phone-side RayNeo iO support in the Glassly repo.
 
-**Revision: `GLASSLYCFW-IO/11`** (host-tested and built; v11 has not been flashed or hardware-validated).
+**Revision: `GLASSLYCFW-IO/12`** (host-tested and built; v12 has not been flashed or hardware-validated).
+
+Revision 12 relays real head-up/down events and applies the phone's head-angle
+setting to the stock detector. See [v12 changes and hardware validation](docs/V12.md).
 
 Revision 11 fixes asset-upload bounds and holes, retains the previous asset until
 its replacement completes and validates, rolls failed PUT/SHOW mutations back,
