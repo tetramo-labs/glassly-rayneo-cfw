@@ -60,6 +60,10 @@ static uint32_t cfw_diag_fill(uint8_t *b, uint8_t source, const customCfwContext
     cfw_put32(p, ctx ? ctx->scene_copies : 0u); p += 4;
     cfw_put16(p, ctx ? ctx->scene_last_ms : 0u); p += 2;
     cfw_put16(p, ctx ? ctx->scene_max_ms : 0u); p += 2;
+    cfw_put32(p, ctx ? ctx->head_events : 0u); p += 4;
+    *p++ = ctx ? ctx->head_direction : 0u;
+    *p++ = ctx ? ctx->head_angle : 0u;
+    *p++ = ctx ? ctx->head_config_status : 0u;
     return (uint32_t)(p - b);
 }
 

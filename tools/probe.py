@@ -76,6 +76,9 @@ def parse_diag(payload):
     if len(payload) >= 51:   # revision 11: scene renders vs shared-eye copies, and render latency
         renders, copies, last_ms, max_ms = struct.unpack_from("<IIHH", payload, 39)
         out.update(scene_renders=renders, scene_copies=copies, scene_last_ms=last_ms, scene_max_ms=max_ms)
+    if len(payload) >= 58:   # revision 13: launcher head events and angle configuration
+        events, direction, angle, status = struct.unpack_from("<IBBB", payload, 51)
+        out.update(head_events=events, head_direction=direction, head_angle=angle, head_config=status)
     return out
 
 

@@ -247,7 +247,8 @@ void cfw_control(customCfwContext *ctx, uint8_t ctrl, uint8_t arg) {
         }
         break;
     case CTRL_HEAD_ANGLE:
-        cfw_head_angle(arg);
+        cfw_head_angle(ctx, arg);
+        cfw_send_diag(ctx);
         break;
     case CTRL_COMPASS:
         cfw_compass_control(ctx, arg);

@@ -47,7 +47,7 @@ AP_SHA = "53afdf5298815849eafca6f315a70606d2a605aff2e563f79050f797d615a988"
 # more than once in the table (e.g. two zlib copies); the chosen zlib cluster is
 # 0x10835xxx (inflateInit2_ / inflate / inflateEnd sit together there).
 FW_SYMBOLS = [
-    ("sysstate_notify_head", "rayneo::service::launcher::SysStateMonitor::notifyHeadUpDownEvent", 0x106DD4A9),
+    ("launcher_handle_head", "rayneo::service::launcher::LauncherThreadMsgHandler::handleHeadUpDownEvent", 0x106EB4DD),
     ("monitor_manager_sysstate", "rayneo::service::launcher::MonitorManager::getSysStateMonitor", 0x106E8471),
     ("sysstate_apply_wakeup", "rayneo::service::launcher::SysStateMonitor::applyWakeupConfig", 0x106DCC2D),
     ("preference_read", "preference_read", 0x107D6C91),
@@ -137,8 +137,8 @@ SHIM_SITE = 0x106D9D1A           # 10-byte inline sequence -> bl cfw_register_sh
 SHIM_STOCK = bytes.fromhex("00241f48204b84610360")
 # Pointer constants the shim relies on; verified so a rebase that moves them fails.
 # Launcher UI-thread head event dispatch, preserving the stock handler.
-HEAD_SITE = 0x106EB518
-HEAD_STOCK_TARGET = 0x106DD4A9
+HEAD_SITE = 0x106EBCAE
+HEAD_STOCK_TARGET = 0x106EB4DD
 # ANCS relay: the one `bl handleAncsNotificationReceived` inside
 # NotificationMessageHandler::handleMessage -> bl cfw_ancs_hook (ancs.c).
 ANCS_SITE = 0x10702E7E
@@ -535,10 +535,10 @@ def build_ap(ap, src=None):
 
     head_stock = _branch_bytes(HEAD_SITE, HEAD_STOCK_TARGET, link=True)
     if ap[off(HEAD_SITE):off(HEAD_SITE) + 4] != head_stock:
-        raise BuildError("head hook site is not `bl SysStateMonitor::notifyHeadUpDownEvent`")
+        raise BuildError("head hook site is not `bl LauncherThreadMsgHandler::handleHeadUpDownEvent`")
     head_new = _branch_bytes(HEAD_SITE, (module_va + funcs["cfw_head_hook"]) | 1, link=True)
     ops.append({"offset": off(HEAD_SITE), "old": head_stock.hex(), "new": head_new.hex(),
-                "desc": "LauncherThreadMsgHandler::handleHeadUpDownEvent -> cfw_head_hook (preserves stock handler)"})
+                "desc": "LauncherThreadMsgHandler::handleMessage -> cfw_head_hook (relay before stock rebond gate)"})
 
     # 2c. Display present: retarget both layer_update calls in pandisp_exec.
     lcdc_hooks = []

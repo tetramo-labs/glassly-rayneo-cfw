@@ -66,8 +66,8 @@ static inline void *fw_sysstate_monitor(void) {
     void *mm = FW(void *(*)(void), FWA_monitor_manager_instance)();
     return mm ? FW(void *(*)(void *), FWA_monitor_manager_sysstate)(mm) : 0;
 }
-static inline void fw_notify_head(void *monitor, uint32_t direction) {
-    FW(void (*)(void *, uint32_t), FWA_sysstate_notify_head)(monitor, direction);
+static inline void fw_handle_head(void *handler, const void *message) {
+    FW(void (*)(void *, const void *), FWA_launcher_handle_head)(handler, message);
 }
 static inline int fw_pref_read(uint32_t key, int32_t *value) {
     return FW(int (*)(uint32_t, int32_t *), FWA_preference_read)(key, value);
@@ -196,9 +196,9 @@ static inline int fw_inflate_end(cfw_zstream *z) { return FW(int (*)(void *), FW
 
 /* ---- CFW link wire protocol (business 0xF0) -------------------------------- */
 #define BIZ_GLASSLY 0xF0u
-#define REV_MAJOR 12u
-#define REV_TEXT  "12"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
-#define REV_STRING "GLASSLYCFW-IO/12"
+#define REV_MAJOR 13u
+#define REV_TEXT  "13"                /* keep with REV_MAJOR: shown on the connect screen (hint.c) */
+#define REV_STRING "GLASSLYCFW-IO/13"
 #define MAX_CHUNK 240u
 /* The store is the largest of 256/192/128/96/64 KiB the heap grants at context
  * creation (ctx.c); IDENT, STATE and DIAG report the size obtained. */
@@ -555,6 +555,8 @@ typedef struct {
     uint16_t scene_last_ms, scene_max_ms;
     uint8_t draw_gray;             /* L8 value geometry writes (gray nibble x 17) */
     void *timer;
+    uint32_t head_events;          /* launcher messages seen after QUERY */
+    uint8_t head_direction, head_angle, head_config_status; /* 0 unset, 1 applied, 2 no monitor, 3/4 preference failure */
     uint32_t lease_deadline;       /* tick */
 
     /* ingress */
@@ -659,8 +661,7 @@ void cfw_screen_state_cb(int old_state, int new_state, int reason);
 void cfw_input_wheel_listen(customCfwContext *ctx, int on);
 void cfw_input_btn_listen(customCfwContext *ctx);
 void cfw_input_poll(customCfwContext *ctx);
-void cfw_head_hook(void *monitor, uint32_t direction);
-void cfw_head_angle(uint8_t angle);
+void cfw_head_angle(customCfwContext *ctx, uint8_t angle);
 void cfw_gesture(customCfwContext *ctx, uint8_t type, uint8_t source);
 
 /* ident.c */
@@ -764,6 +765,7 @@ typedef struct {
     void *context;
     uint8_t mode, padding[3];      /* 0 or 1; the queue refuses anything else */
 } TIONativeMessage;
+void cfw_head_hook(void *handler, const TIONativeMessage *message);
 
 /* ancs.c: retargeted from NotificationMessageHandler::handleMessage (build.py) */
 void cfw_ancs_hook(void *self, const TIONativeMessage *m);

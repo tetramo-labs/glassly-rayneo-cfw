@@ -93,10 +93,11 @@ ACK   [01][stream][ordinal u16][lens=1][size u16][crc u16]
 NACK  [03][stream][ordinal u16][lens][size u16][crc u16]
 REPLY [05][stream][ordinal u16][lens][mode][request u16][status u8][epoch u16][revision u32]   (before the ACK)
 GESTURE [07][eventType u8][source u8][tick u32 LE]
-IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/12"[00][lineHeight u8]   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes, bit 4 = raster family, bit 5 = remote mic stream, bit 6 = head gestures + angle control; the NUL and the builtin font's line pitch in px follow the name since revision 8)
+IDENT [11][ver u8][w u16 LE][h u16 LE][maxChunk u16 LE][storeKiB u16 LE][revision u16 LE][flags u8]"GLASSLYCFW-IO/13"[00][lineHeight u8]   (w,h = 540x220 since revision 5; flags bit 3 = stereo: two lens scenes, bit 4 = raster family, bit 5 = remote mic stream, bit 6 = head gestures + angle control; the NUL and the builtin font's line pitch in px follow the name since revision 8)
 PAGE  [13][state u8][reason u8]
 DIAG  [15][source u8][entry u32][ctx u32][uiModule u8][regRc i8][sendRc i8][timer u32][tick u32][arena u32][free u32][largest u32][inuse u32][storeKiB u16]   (the heap fields since revision 10: mallinfo of the stock heap; storeKiB = the store the heap granted)
        [sceneRenders u32][sceneCopies u32][sceneLastMs u16][sceneMaxMs u16] (revision 11; appended at byte 39)
+       [headEvents u32][headDirection u8][headAngle u8][headConfig u8] (revision 13; appended at byte 51)
 ANCS  [17][seq u8][total u16 LE][offset u16 LE][json chunk]   (iOS notification relay, ancs.c)
 DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16][nplanes u8][fbmem u32][fblen u32][stride u16][display u8][bpp u8][xresV u32][yresV u32][xoff u32][yoff u32][map u32][buf2 u32][yoff2 u32][cf u8][w u32][h u32][drawStride u32][refrPass u8][leftParallax i32][rightParallax i32][depthMode i32][dispMode i32][lcdc b5 b6 b7 b8]   (display probe, disp.c; tooling only, the phone ignores it)
 ```
@@ -108,7 +109,7 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
   frame's left and right SHOWs into one stream (ordinals 0 and 1) so both
   lenses apply them in the same handler call; each lens acks and replies to
   the record addressed to it.
-* IDENT: `ver=12`, `w=540`, `h=220`, `maxChunk=240`, `storeKiB` = 64..256 (revision 10 takes the largest of 256/192/128/96/64 KiB the heap grants; before it was a fixed 64), `revision=12`,
+* IDENT: `ver=13`, `w=540`, `h=220`, `maxChunk=240`, `storeKiB` = 64..256 (revision 10 takes the largest of 256/192/128/96/64 KiB the heap grants; before it was a fixed 64), `revision=13`,
   `flags = 0x7F` normally. Flag bits: **bit0** = zlib COMPRESSED records
   accepted (the stock inflater is used); **bit1** = raw packets accepted on
   business 0xF0; **bit2** = the heap context existed when IDENT was built
@@ -188,7 +189,11 @@ DISP  [19][mode u8][rc i8][disp u32][drv u32][fd i32][fmt u8][xres u16][yres u16
 * HEAD_ANGLE control `[10][stream][07][degrees]` (revision 12, IDENT bit 6):
   enables the stock head detector and applies the threshold, clamped to 0..90.
   The argument is required; a truncated control is ignored. Head preferences
-  persist, and crown wake is untouched. No reply is defined for this control.
+  persist, and crown wake is untouched. Since revision 13 this sends a DIAG
+  with headConfig: 0 unset, 1 stock apply returned (not a sensor ACK), 2 no monitor,
+  3 threshold write failed, 4 enable write failed. Head-event counts include
+  valid detector messages dropped by the uplink reserve. The relay now precedes
+  the stock re-pairing gate; the original handler still runs.
 * PAGE `state` 1 open/0 closed; `reason` 0 ok, 1 launcher busy, 2 not paired (no longer sent),
   3 lease expired, 4 user backed out.
 
